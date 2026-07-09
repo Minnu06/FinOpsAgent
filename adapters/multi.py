@@ -49,3 +49,9 @@ class MultiCloudAdapter:
         result = pd.concat(frames, ignore_index=True)
         _log.debug("MultiCloudAdapter.get_metadata -> %d total rows across all providers", len(result))
         return result
+
+    def list_services(self) -> list[str]:
+        services: set[str] = set()
+        for a in self._adapters:
+            services.update(a.list_services())
+        return sorted(services)

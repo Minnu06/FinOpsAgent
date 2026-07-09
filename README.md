@@ -27,6 +27,8 @@ than compute a date itself.
 
 ```
 adapters/       CloudAdapter Protocol + SyntheticAdapter (CSV) + MultiCloudAdapter (fan-out)
+                + factory.py (provider -> adapter registry)
+resolvers/      service_registry.py — canonical service catalog + synonym/fuzzy resolution
 tools/          finops_tools.py — cost_trend, detect_spike, find_idle_resources, recommend
 agent/          llm.py (OpenAI/Ollama), tool_schemas.py, loop.py (tool-calling loop), cli.py
 app.py          Chainlit UI — visible cl.Step per tool call, streamed final answer
@@ -206,8 +208,9 @@ On **Tuesday 2026-06-16**, twelve `m5.4xlarge` EC2 instances named `loadtest-wor
 
 `adapters/` is the only layer that changes. Everything in `tools/`, `agent/`, and
 `app.py` is written against the `CloudAdapter` Protocol
-(`get_cost`, `get_utilization`, `get_metadata`) and never imports pandas-specific or
-provider-specific logic — so a real adapter is a drop-in replacement.
+(`get_cost`, `get_utilization`, `get_metadata`, `list_services`) and never imports
+pandas-specific or provider-specific logic — so a real adapter is a drop-in
+replacement.
 
 ```python
 # adapters/aws.py (v2, not yet implemented)
@@ -225,18 +228,29 @@ class AWSAdapter:
     def get_metadata(self, resource_ids):
         # boto3 EC2/Lambda/S3 describe calls: ec2.describe_instances(...), etc.
         ...
+
+    def list_services(self):
+        # which services this account actually has cost data for — used by the
+        # validation layer to report "data not available" instead of a silent
+        # empty result. A real adapter might cache this from a first Cost
+        # Explorer call rather than re-querying per request.
+        ...
 ```
 
-Then in `tools/finops_tools.py`, swap the module-level adapter construction:
+Then register it in `adapters/factory.py` — the single place every other module asks
+"give me the adapter for provider X":
 
 ```python
-_AWS = AWSAdapter()      # was SyntheticAdapter("AWS")
-_AZURE = AzureAdapter()  # was SyntheticAdapter("Azure")
+from adapters.factory import register
+
+register("AWS", AWSAdapter())      # was register("AWS", SyntheticAdapter("AWS"))
+register("Azure", AzureAdapter())  # was register("Azure", SyntheticAdapter("Azure"))
 ```
 
 No changes needed to `detect_spike`, `find_idle_resources`, `recommend`, the tool
-schemas, the agent loop, or the Chainlit UI — they only ever see `pandas.DataFrame`
-results shaped by the Protocol, never the underlying API.
+schemas, the agent loop, the resolver/validation layer, or the Chainlit UI — they only
+ever see `pandas.DataFrame` results shaped by the Protocol, never the underlying API or
+how adapters are constructed.
 
 | Rule (`find_idle_resources`) | v1 (synthetic) | v2 (real) |
 |---|---|---|

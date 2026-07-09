@@ -14,18 +14,14 @@ from typing import Any
 
 import pandas as pd
 
+from adapters import factory
 from adapters.base import CloudAdapter
 from adapters.multi import MultiCloudAdapter
-from adapters.synthetic import SyntheticAdapter
 from logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-_AWS = SyntheticAdapter("AWS")
-_AZURE = SyntheticAdapter("Azure")
-_ALL = MultiCloudAdapter([_AWS, _AZURE])
-
-_ADAPTERS: dict[str, CloudAdapter] = {"AWS": _AWS, "Azure": _AZURE}
+_ALL = MultiCloudAdapter(factory.all_adapters())
 
 _COMPUTE_SERVICES = ("EC2", "Virtual Machine")
 _FUNCTION_SERVICES = ("Lambda", "Azure Functions")
@@ -47,17 +43,19 @@ _DEFAULT_TREND_WINDOW_DAYS = 30
 def _adapter_for(provider: str | None) -> CloudAdapter:
     if provider is None:
         return _ALL
-    if provider not in _ADAPTERS:
-        raise ValueError(f"Unknown provider {provider!r}; expected one of {sorted(_ADAPTERS)} or omit it to scan both.")
-    return _ADAPTERS[provider]
+    if provider not in factory.all_providers():
+        raise ValueError(
+            f"Unknown provider {provider!r}; expected one of {factory.all_providers()} or omit it to scan both."
+        )
+    return factory.get(provider)
 
 
 def _max_available_date() -> date:
-    return max(_AWS.df["date"].max(), _AZURE.df["date"].max())
+    return max(factory.get("AWS").df["date"].max(), factory.get("Azure").df["date"].max())
 
 
 def _min_available_date() -> date:
-    return min(_AWS.df["date"].min(), _AZURE.df["date"].min())
+    return min(factory.get("AWS").df["date"].min(), factory.get("Azure").df["date"].min())
 
 
 def data_date_range() -> tuple[date, date]:

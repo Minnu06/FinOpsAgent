@@ -111,3 +111,6 @@ class SyntheticAdapter:
         result = latest[_METADATA_COLUMNS].copy()
         _log.debug("%s.get_metadata(%d resource_ids) -> %d rows", self.provider, len(resource_ids), len(result))
         return result
+
+    def list_services(self) -> list[str]:
+        return sorted(self.df["service"].unique())

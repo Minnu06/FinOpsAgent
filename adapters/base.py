@@ -28,3 +28,15 @@ class CloudAdapter(Protocol):
     def get_utilization(self, resource_ids: list[str]) -> pd.DataFrame: ...
 
     def get_metadata(self, resource_ids: list[str]) -> pd.DataFrame: ...
+
+    def list_services(self) -> list[str]:
+        """Concrete service names this adapter actually has data for.
+
+        Used by the validation layer to distinguish "valid service, wrong
+        provider" (e.g. Azure EC2 — rejected) from "valid service, provider
+        supports it, but this dataset has no rows for it" (e.g. AWS S3 —
+        reported as unavailable, not silently empty). Protocols aren't
+        runtime-enforced, so callers should treat a missing implementation as
+        "unknown, assume available" rather than crash.
+        """
+        ...
