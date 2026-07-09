@@ -16,13 +16,21 @@ you — it never invents a dollar figure.
 
 Every number on screen is traceable to a query — the demo cannot hallucinate costs.
 
+The same discipline applies to dates: the system prompt is grounded with the dataset's
+actual min/max available dates every turn, so the model treats the data's most recent
+day as "today" instead of guessing a year from its own training cutoff. `cost_trend`'s
+`start`/`end` are optional and default to the last 30 days of available data — the model
+is instructed to omit them for relative questions ("last 30 days", "recently") rather
+than compute a date itself.
+
 ## Architecture
 
 ```
-adapters/   CloudAdapter Protocol + SyntheticAdapter (CSV) + MultiCloudAdapter (fan-out)
-tools/      finops_tools.py — cost_trend, detect_spike, find_idle_resources, recommend
-agent/      llm.py (OpenAI/Ollama), tool_schemas.py, loop.py (tool-calling loop), cli.py
-app.py      Chainlit UI — visible cl.Step per tool call, streamed final answer
+adapters/       CloudAdapter Protocol + SyntheticAdapter (CSV) + MultiCloudAdapter (fan-out)
+tools/          finops_tools.py — cost_trend, detect_spike, find_idle_resources, recommend
+agent/          llm.py (OpenAI/Ollama), tool_schemas.py, loop.py (tool-calling loop), cli.py
+app.py          Chainlit UI — visible cl.Step per tool call, streamed final answer
+logging_setup.py  Per-session logging (logs/) shared by every layer above
 ```
 
 Only `adapters/` knows how data is fetched. Everything above it works with plain
@@ -132,6 +140,28 @@ Opens at **http://localhost:8000**. If that port is taken, pass `--port <n>`.
   prompt (same agent, same tools — only the first message differs).
 
 To stop the server, `Ctrl+C` in the terminal it's running in.
+
+- **Conversation memory**: within a chat session, follow-up questions ("what about
+  Azure?", "how much would that save?") have context — prior turns (including tool
+  results already fetched) are threaded into the next call. A new browser tab/session
+  starts fresh. The CLI is single-shot per process, so history doesn't carry between
+  separate `agent.cli` invocations.
+
+## Logs and debugging
+
+Every session — CLI run or Chainlit chat — gets its own log file under `logs/`
+(`logs/<timestamp>_<cli|chainlit>_<session_id>.log`), created by `logging_setup.py`.
+
+- **Console** (visible while running): a clean, one-line-per-event narrative — the user
+  query, which tool was called with what arguments, and the result summary. This is
+  what you see in the CLI output above.
+- **File** (`logs/*.log`): the same narrative at DEBUG level, plus the full JSON payload
+  of every tool call/result and every adapter-level query (`SyntheticAdapter.get_cost`,
+  `MultiCloudAdapter` fan-out, row counts) — enough to reconstruct exactly what happened
+  in a session after the fact.
+
+Log files are gitignored (`logs/*.log`); the folder itself is tracked via `logs/.gitkeep`
+so it always exists.
 
 ## Running fully local (no OpenAI calls)
 

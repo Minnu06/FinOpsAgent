@@ -5,6 +5,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "finops_combined.csv"
 
 _METADATA_COLUMNS = [
@@ -67,6 +71,7 @@ class SyntheticAdapter:
         self._path = Path(data_path)
         full = _load_csv(self._path)
         self.df = full[full["provider"] == provider].reset_index(drop=True)
+        _log.debug("SyntheticAdapter(%s) loaded %d rows from %s", provider, len(self.df), self._path.name)
 
     def get_cost(
         self,
@@ -84,17 +89,25 @@ class SyntheticAdapter:
             mask &= df["region"] == region
         df = df.loc[mask]
 
-        if group_by:
-            return df.groupby(group_by, as_index=False)["cost_usd"].sum()
-        return df[_COST_COLUMNS].copy()
+        result = df.groupby(group_by, as_index=False)["cost_usd"].sum() if group_by else df[_COST_COLUMNS].copy()
+        _log.debug(
+            "%s.get_cost(start=%s, end=%s, service=%s, region=%s, group_by=%s) -> %d rows",
+            self.provider, start, end, service, region, group_by, len(result),
+        )
+        return result
 
     def get_utilization(self, resource_ids: list[str]) -> pd.DataFrame:
         df = self.df[self.df["resource_id"].isin(resource_ids)]
-        return df[_UTILIZATION_COLUMNS].copy()
+        result = df[_UTILIZATION_COLUMNS].copy()
+        _log.debug("%s.get_utilization(%d resource_ids) -> %d rows", self.provider, len(resource_ids), len(result))
+        return result
 
     def get_metadata(self, resource_ids: list[str]) -> pd.DataFrame:
         df = self.df[self.df["resource_id"].isin(resource_ids)]
         if df.empty:
+            _log.debug("%s.get_metadata(%d resource_ids) -> 0 rows", self.provider, len(resource_ids))
             return df[_METADATA_COLUMNS].copy()
         latest = df.sort_values("date").groupby("resource_id", as_index=False).last()
-        return latest[_METADATA_COLUMNS].copy()
+        result = latest[_METADATA_COLUMNS].copy()
+        _log.debug("%s.get_metadata(%d resource_ids) -> %d rows", self.provider, len(resource_ids), len(result))
+        return result

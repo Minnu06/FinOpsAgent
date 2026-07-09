@@ -30,3 +30,7 @@ __pycache__/
 .chainlit/
 .env
 *.egg-info/
+
+### Logs ###
+logs/*.log
+!logs/.gitkeep

@@ -17,6 +17,9 @@ import pandas as pd
 from adapters.base import CloudAdapter
 from adapters.multi import MultiCloudAdapter
 from adapters.synthetic import SyntheticAdapter
+from logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 _AWS = SyntheticAdapter("AWS")
 _AZURE = SyntheticAdapter("Azure")
@@ -38,6 +41,7 @@ _SPIKE_TRAILING_WINDOW_DAYS = 14
 _SPIKE_STD_MULTIPLIER = 2.0
 _SPIKE_PCT_THRESHOLD = 25.0
 _MAX_RECORDS = 30
+_DEFAULT_TREND_WINDOW_DAYS = 30
 
 
 def _adapter_for(provider: str | None) -> CloudAdapter:
@@ -54,6 +58,14 @@ def _max_available_date() -> date:
 
 def _min_available_date() -> date:
     return min(_AWS.df["date"].min(), _AZURE.df["date"].min())
+
+
+def data_date_range() -> tuple[date, date]:
+    """(min_date, max_date) of available cost data — used to ground the
+    agent's system prompt so it doesn't guess "today" from its own training
+    cutoff (e.g. assuming the current year is wrong for this dataset).
+    """
+    return _min_available_date(), _max_available_date()
 
 
 def _to_date(value: str | date) -> date:
@@ -78,8 +90,8 @@ def _monthly_cost(adapter: CloudAdapter, resource_id: str, window_start: date, w
 
 
 def cost_trend(
-    start: str | date,
-    end: str | date,
+    start: str | date | None = None,
+    end: str | date | None = None,
     service: str | None = None,
     provider: str | None = None,
     granularity: str = "day",
@@ -88,9 +100,16 @@ def cost_trend(
 
     Use for plain spend questions ("what did we spend on X", "show me the
     trend"). Does NOT identify anomalies or drivers — use detect_spike for
-    "why did cost go up".
+    "why did cost go up". If start/end are omitted, defaults to the most
+    recent 30 days of available data — do not guess dates yourself.
     """
-    start_d, end_d = _to_date(start), _to_date(end)
+    end_d = _to_date(end) if end is not None else _max_available_date()
+    start_d = (
+        _to_date(start)
+        if start is not None
+        else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
+    )
+    _log.info("cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s)", start_d, end_d, service, provider, granularity)
     adapter = _adapter_for(provider)
 
     df = adapter.get_cost(start_d, end_d, service=service, group_by=["date"])
@@ -115,6 +134,7 @@ def cost_trend(
             (df["cost_usd"].iloc[-1] - df["cost_usd"].iloc[0]) / df["cost_usd"].iloc[0] * 100, 1
         )
 
+    _log.info("cost_trend -> total=$%.2f avg_daily=$%.2f pct_change=%.1f%% (%d points)", total, avg_daily, pct_change_first_last, len(series))
     return {
         "series": series[:_MAX_RECORDS],
         "total": total,
@@ -135,6 +155,7 @@ def detect_spike(
     standard deviations or a 25% jump. Do NOT use for plain spend totals —
     use cost_trend for that.
     """
+    _log.info("detect_spike(lookback_days=%s, provider=%s, service=%s)", lookback_days, provider, service)
     adapter = _adapter_for(provider)
     max_date = _max_available_date()
     min_date = _min_available_date()
@@ -144,6 +165,7 @@ def detect_spike(
 
     raw = adapter.get_cost(query_start, max_date, service=service, group_by=["date", "provider", "service", "region"])
     if raw.empty:
+        _log.info("detect_spike -> no cost data available for the given filters")
         return {"spike_date": None, "message": "No cost data available for the given filters."}
 
     full_dates = pd.date_range(query_start, max_date, freq="D").date
@@ -181,6 +203,7 @@ def detect_spike(
                 }
 
     if best is None:
+        _log.info("detect_spike -> no anomalies detected in the given window")
         return {"spike_date": None, "message": "No anomalies detected in the given window."}
 
     spike_date = best["date"]
@@ -203,6 +226,10 @@ def detect_spike(
         driver_summary["instance_type"] = _mode(meta["instance_type"])
         driver_summary["environment"] = _mode(meta["environment"])
 
+    _log.info(
+        "detect_spike -> spike_date=%s service=%s provider=%s region=%s baseline=$%.2f spiked=$%.2f (+%.1f%%) drivers=%d",
+        spike_date, best["service"], best["provider"], best["region"], best["baseline"], best["spiked"], best["pct_increase"], len(driver_ids),
+    )
     return {
         "spike_date": spike_date.isoformat(),
         "service": best["service"],
@@ -262,6 +289,10 @@ def find_idle_resources(
     its own to sweep for waste. Do NOT use this to compute savings — use
     recommend for that.
     """
+    _log.info(
+        "find_idle_resources(provider=%s, service=%s, resource_ids=%s)",
+        provider, service, f"{len(resource_ids)} given" if resource_ids else "none (sweeping all)",
+    )
     adapter = _adapter_for(provider)
     max_date = _max_available_date()
     window_start = max_date - timedelta(days=_UTILIZATION_WINDOW_DAYS - 1)
@@ -271,6 +302,7 @@ def find_idle_resources(
         adapter, service, window_start, max_date
     )
     if not candidate_ids:
+        _log.info("find_idle_resources -> no candidate resources in scope")
         return {"idle_resources": [], "count": 0}
 
     meta = adapter.get_metadata(candidate_ids).set_index("resource_id")
@@ -338,6 +370,8 @@ def find_idle_resources(
                     }
                 )
 
+    reason_counts = {r: sum(1 for i in idle if i["reason"] == r) for r in dict.fromkeys(i["reason"] for i in idle)}
+    _log.info("find_idle_resources -> %d idle of %d candidates checked, by reason: %s", len(idle), len(candidate_ids), reason_counts)
     return {"idle_resources": _cap_round_robin(idle, "reason", _MAX_RECORDS), "count": len(idle)}
 
 
@@ -350,7 +384,9 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
     Use after find_idle_resources to price out the recommended fix. Do NOT
     use this to discover waste — use find_idle_resources for that.
     """
+    _log.info("recommend(%d resource_ids)", len(resource_ids) if resource_ids else 0)
     if not resource_ids:
+        _log.info("recommend -> no resource_ids given")
         return {"recommendations": [], "total_monthly_saving_usd": 0.0}
 
     adapter = _ALL
@@ -424,6 +460,7 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
             recommendations.append(rec)
             total_saving += saving
 
+    _log.info("recommend -> %d recommendation(s), total_monthly_saving_usd=$%.2f", len(recommendations), total_saving)
     return {
         "recommendations": _cap_round_robin(recommendations, "action", _MAX_RECORDS),
         "total_monthly_saving_usd": round(total_saving, 2),
