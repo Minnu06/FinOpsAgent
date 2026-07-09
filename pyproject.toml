@@ -1,0 +1,13 @@
+[project]
+name = "finopsagent"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "chainlit>=2.11.1",
+    "ollama>=0.6.2",
+    "openai>=2.44.0",
+    "pandas>=3.0.3",
+    "pytest>=9.1.1",
+    "python-dotenv>=1.2.2",
+]

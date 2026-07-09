@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git checkout*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git pull*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr*)",
+      "Read(**)",
+      "Write(**)",
+      "Edit(**)"
+    ],
+    "deny": [
+      "Bash(pip install*)",
+      "Bash(pip3 install*)",
+      "Bash(npm install*)",
+      "Bash(apt install*)",
+      "Bash(apt-get install*)",
+      "Bash(sudo*)",
+      "Bash(rm -rf*)",
+      "Bash(mv /home*)",
+      "Bash(cp /home*)",
+      "Bash(curl*)",
+      "Bash(wget*)",
+      "Bash(chmod*)",
+      "Bash(ssh*)"
+    ]
+  }
+}
