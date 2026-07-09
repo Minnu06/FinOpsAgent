@@ -84,16 +84,30 @@ def run_agent(
     user_message: str,
     on_tool_call: ToolCallHook | None = None,
     max_turns: int = 8,
+    provider: str | None = None,
 ) -> str:
     """Run the tool-calling loop for a single user message.
 
     Returns the final assistant text. `on_tool_call(name, args, result)` fires after
     each tool executes, purely for UI rendering (a visible step in the CLI/Chainlit
     app) — it never influences the loop's control flow.
+
+    `provider`, if given (e.g. "AWS" or "Azure" from a UI dropdown), hard-forces every
+    tool call's `provider` argument to that value — this is a deterministic filter, not
+    a suggestion the model can ignore. Omit (or None) to let the model infer scope per
+    the system prompt's provider-inference rules and scan both clouds when ambiguous.
     """
     client = get_llm_client()
+    system_content = SYSTEM_PROMPT
+    if provider:
+        system_content += (
+            f"\n\nSESSION SCOPE OVERRIDE: The user has restricted this session to "
+            f"provider={provider} only via a UI control. Every tool call is forced to "
+            f"provider='{provider}' regardless of what you request — do not discuss the "
+            f"other cloud's numbers unless the user explicitly asks about it."
+        )
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_message},
     ]
 
@@ -115,13 +129,17 @@ def run_agent(
             func = REGISTRY.get(tc.name)
             if func is None:
                 result = {"error": f"Unknown tool: {tc.name}"}
+                args = tc.arguments
             else:
+                args = _coerce_args(tc.name, tc.arguments)
+                if provider and "provider" in _PARAM_TYPES.get(tc.name, {}):
+                    args["provider"] = provider
                 try:
-                    result = func(**_coerce_args(tc.name, tc.arguments))
+                    result = func(**args)
                 except Exception as exc:  # noqa: BLE001 - fed back to the model, not swallowed
                     result = {"error": f"{type(exc).__name__}: {exc}"}
             if on_tool_call:
-                on_tool_call(tc.name, tc.arguments, result)
+                on_tool_call(tc.name, args, result)
             messages.append(_tool_message(tc.id, tc.name, result))
 
     return "I wasn't able to reach a final answer within the tool-call budget. Please try narrowing the question."

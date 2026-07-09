@@ -52,3 +52,39 @@ def test_agent_loop_chains_detect_spike_idle_recommend(monkeypatch):
 
     assert calls == ["detect_spike", "find_idle_resources", "recommend"]
     assert "Total monthly saving: $6634.0" == answer
+
+
+class _WrongProviderClient:
+    """A model that ignores the session's provider scope and asks for the other cloud."""
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        return LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="1", name="detect_spike", arguments={"provider": "Azure"})],
+        )
+
+
+def test_provider_override_wins_over_model_request(monkeypatch):
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: _WrongProviderClient())
+
+    executed_args: list[dict[str, Any]] = []
+
+    def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        executed_args.append(args)
+
+    run_agent("why did cost go up?", on_tool_call=on_tool_call, provider="AWS", max_turns=1)
+
+    assert executed_args[0]["provider"] == "AWS"
+
+
+def test_no_provider_override_leaves_model_choice_untouched(monkeypatch):
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: _WrongProviderClient())
+
+    executed_args: list[dict[str, Any]] = []
+
+    def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        executed_args.append(args)
+
+    run_agent("why did cost go up?", on_tool_call=on_tool_call, provider=None, max_turns=1)
+
+    assert executed_args[0]["provider"] == "Azure"

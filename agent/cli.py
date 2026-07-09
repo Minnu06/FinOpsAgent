@@ -1,4 +1,4 @@
-"""CLI entry point: python -m agent.cli "why did EC2 cost go up?" """
+"""CLI entry point: python -m agent.cli "why did EC2 cost go up?" [--provider AWS|Azure]"""
 
 from __future__ import annotations
 
@@ -15,15 +15,22 @@ def _print_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) ->
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print('Usage: python -m agent.cli "your question"')
+    args = sys.argv[1:]
+    provider: str | None = None
+    if "--provider" in args:
+        idx = args.index("--provider")
+        provider = args[idx + 1]
+        del args[idx : idx + 2]
+
+    if not args:
+        print('Usage: python -m agent.cli "your question" [--provider AWS|Azure]')
         sys.exit(1)
 
-    question = " ".join(sys.argv[1:])
-    print(f"> {question}")
+    question = " ".join(args)
+    print(f"> {question}" + (f"  [provider={provider}]" if provider else ""))
 
     try:
-        answer = run_agent(question, on_tool_call=_print_tool_call)
+        answer = run_agent(question, on_tool_call=_print_tool_call, provider=provider)
     except Exception as exc:  # noqa: BLE001 - friendly CLI message, not a stack trace
         print(f"\n\033[31mAgent error:\033[0m {type(exc).__name__}: {exc}")
         print("Check that OPENAI_API_KEY is set (or set LLM_PROVIDER=ollama in .env for a fully local run).")
