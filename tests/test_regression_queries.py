@@ -44,6 +44,11 @@ _SUCCESS_CASES = [
     pytest.param("cost_trend", {"service": "EC2", "business_unit": "Platform"}, id="Platform business_unit EC2 cost"),
     pytest.param("cost_trend", {}, id="last month's cost (no service, no provider)"),
     pytest.param("cost_trend", {"service": "EC2", "granularity": "day"}, id="daily EC2 trend"),
+    pytest.param("list_resources", {}, id="what's running (no filters)"),
+    pytest.param("list_resources", {"provider": "AWS", "service": "EC2", "status": "running"}, id="running EC2 instances"),
+    pytest.param("list_resources", {"provider": "Azure", "service": "Virtual Machine", "status": "stopped"}, id="stopped Azure VMs"),
+    pytest.param("cost_trend", {"service": "EC2", "instance_type": "m5.2xlarge"}, id="EC2 m5.2xlarge cost"),
+    pytest.param("list_resources", {"instance_type": "Standard_D4s_v5"}, id="Standard_D4s_v5 resources"),
 ]
 
 
@@ -114,6 +119,52 @@ _REJECTION_CASES = [
 def test_impossible_combo_is_rejected(args: dict[str, Any]) -> None:
     result = resolve_and_execute("cost_trend", args)
     assert result["status"] == "invalid_request"
+
+
+# --- instance_type: ambiguous size words, provider mismatches, unresolved strings ---
+
+_INSTANCE_TYPE_CLARIFICATION_CASES = [
+    pytest.param({"instance_type": "large"}, {"AWS m5.2xlarge", "Azure Standard_D4s_v5"}, id="large instance cost"),
+    pytest.param({"instance_type": "compute optimized"}, {"AWS c5.4xlarge", "Azure Standard_F8s_v2"}, id="compute optimized instance cost"),
+]
+
+
+@pytest.mark.parametrize("args, expected_options", _INSTANCE_TYPE_CLARIFICATION_CASES)
+def test_ambiguous_instance_type_needs_clarification(args: dict[str, Any], expected_options: set[str]) -> None:
+    result = resolve_and_execute("cost_trend", args)
+    assert result["status"] == "clarification_needed"
+    assert set(result["options"]) == expected_options
+
+
+_INSTANCE_TYPE_REJECTION_CASES = [
+    pytest.param({"provider": "Azure", "instance_type": "m5.2xlarge"}, id="Azure + AWS instance type"),
+    pytest.param({"service": "Virtual Machine", "instance_type": "c5.4xlarge"}, id="Azure VM + AWS instance type"),
+]
+
+
+@pytest.mark.parametrize("args", _INSTANCE_TYPE_REJECTION_CASES)
+def test_instance_type_provider_mismatch_is_rejected(args: dict[str, Any]) -> None:
+    result = resolve_and_execute("cost_trend", args)
+    assert result["status"] == "invalid_request"
+
+
+def test_unresolved_instance_type_is_reported_distinctly() -> None:
+    result = resolve_and_execute("cost_trend", {"instance_type": "banana.xlarge"})
+    assert result["status"] == "unresolved_instance_type"
+
+
+# --- list_resources vs find_idle_resources: distinct tools, not interchangeable ---
+
+
+def test_list_resources_never_applies_idle_heuristics_end_to_end() -> None:
+    idle = resolve_and_execute("find_idle_resources", {"provider": "AWS", "service": "EC2"})
+    listed = resolve_and_execute("list_resources", {"provider": "AWS", "service": "EC2"})
+    assert "status" not in idle and "status" not in listed
+    assert "idle_resources" in idle and "reason" in idle["idle_resources"][0]
+    assert "resources" in listed and "reason" not in listed["resources"][0]
+    # list_resources sweeps the full inventory (running + stopped), which is
+    # always >= the idle subset find_idle_resources flags.
+    assert listed["count"] >= idle["count"]
 
 
 # --- Multi-turn: clarification/rejection followed by a corrected follow-up ---

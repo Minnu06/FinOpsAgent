@@ -23,9 +23,18 @@ from typing import Any
 # in the order they matter for readability (not evaluation order — to_kwargs
 # only includes fields whose value is not None).
 _TOOL_FIELDS: dict[str, tuple[str, ...]] = {
-    "cost_trend": ("start", "end", "service", "provider", "granularity", "region", "environment", "business_unit"),
-    "detect_spike": ("lookback_days", "provider", "service", "region", "environment", "business_unit"),
-    "find_idle_resources": ("provider", "service", "resource_ids", "region", "environment", "business_unit"),
+    "cost_trend": (
+        "start", "end", "service", "provider", "granularity", "region", "environment", "business_unit", "instance_type"
+    ),
+    "detect_spike": (
+        "lookback_days", "provider", "service", "region", "environment", "business_unit", "instance_type"
+    ),
+    "find_idle_resources": (
+        "provider", "service", "resource_ids", "region", "environment", "business_unit", "instance_type"
+    ),
+    "list_resources": (
+        "provider", "service", "resource_ids", "region", "environment", "business_unit", "instance_type", "status"
+    ),
     "recommend": ("resource_ids",),
 }
 
@@ -41,6 +50,7 @@ class CanonicalRequest:
     instance_type: str | None = None
     environment: str | None = None
     business_unit: str | None = None
+    status: str | None = None  # "running" | "stopped" — list_resources only
 
     start: str | date | None = None
     end: str | date | None = None

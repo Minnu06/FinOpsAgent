@@ -26,15 +26,16 @@ than compute a date itself.
 ## Architecture
 
 ```
-adapters/       CloudAdapter Protocol + SyntheticAdapter (CSV) + MultiCloudAdapter (fan-out)
+adapters/       CloudAdapter Protocol + SyntheticAdapter (Excel) + MultiCloudAdapter (fan-out)
                 + factory.py (provider -> adapter registry)
-resolvers/      service_registry.py    — canonical 17-service catalog + synonym/fuzzy resolution
-                provider_resolver.py   — explicit provider wins > unambiguous service infers it >
-                                          ambiguous cross-provider word clarifies > no service scans both
-                canonical_request.py   — CanonicalRequest + to_kwargs(tool_name) projection
-                validation.py          — combines the above + data-availability into accept/reject
-                dispatch.py            — resolve_and_execute(name, args): the seam agent/loop.py calls
-tools/          finops_tools.py — cost_trend, detect_spike, find_idle_resources, recommend
+resolvers/      service_registry.py       — canonical 17-service catalog + synonym/fuzzy resolution
+                instance_type_registry.py — canonical 12-instance-type catalog + size-tier resolution
+                provider_resolver.py      — explicit provider wins > unambiguous service infers it >
+                                             ambiguous cross-provider word clarifies > no service scans both
+                canonical_request.py      — CanonicalRequest + to_kwargs(tool_name) projection
+                validation.py             — combines the above + data-availability into accept/reject
+                dispatch.py               — resolve_and_execute(name, args): the seam agent/loop.py calls
+tools/          finops_tools.py — cost_trend, detect_spike, find_idle_resources, list_resources, recommend
 agent/          llm.py (OpenAI/Ollama), tool_schemas.py, loop.py (tool-calling loop), cli.py
 app.py          Chainlit UI — visible cl.Step per tool call, streamed final answer
 logging_setup.py  Per-session logging (logs/) shared by every layer above
@@ -54,33 +55,57 @@ clarifying question:
 
 1. **`service_registry.resolve(raw)`** — exact concrete name (`"EC2"`) → service-specific
    synonym (`"ebs volume"` → EBS) → ambiguous cross-provider concept word (`"vm"`,
-   `"storage"`, `"function"`) → fuzzy fallback (`difflib`) for typos.
+   `"storage"`, `"function"`) → fuzzy fallback (`difflib`) for typos. `instance_type_registry`
+   mirrors this exactly one level down (instance *size* within a service): exact concrete
+   name (`"m5.2xlarge"`) → type-specific synonym (`"d8s v5"` → `Standard_D8s_v5`) →
+   ambiguous cross-provider size tier (`"large"`, `"xlarge"`, `"compute optimized"`) →
+   fuzzy fallback.
 2. **`provider_resolver.resolve_provider_and_service(...)`** — an explicit provider (UI
    dropdown or the user naming a cloud) always wins; a service that maps to exactly one
    provider infers it directly; a service that maps to multiple providers with no
    explicit provider asks for clarification instead of guessing; naming no service at
-   all scans both clouds (nothing to disambiguate).
+   all scans both clouds (nothing to disambiguate). `validation.py` runs the equivalent
+   reconciliation for `instance_type` afterward, using whatever provider the service (or
+   an explicit dropdown) already pinned down to resolve an otherwise-ambiguous size word
+   — a mismatch between the two (e.g. service resolves to Azure but the instance type is
+   AWS-only) is a rejection, not a silent override.
 3. **`validation.validate(...)`** — combines the above with an *injected*
-   `available_services` callable (never an adapter import) to add a fourth outcome: a
+   `available_services` callable (never an adapter import) to add another outcome: a
    service can be real per the registry but simply absent from this dataset.
 
 The result is either a validated `CanonicalRequest` (executed via `to_kwargs(tool_name)`
 projecting it onto the tool's existing flat kwargs) or a short-circuit `dict` with one of
-three `status` values, which the LLM is instructed to relay to the user rather than
+these `status` values, which the LLM is instructed to relay to the user rather than
 narrate around:
 
 | `status` | Meaning | Example |
 |---|---|---|
-| `clarification_needed` | Service word spans multiple clouds, no provider named | `"VM cost"` → asks AWS EC2 or Azure Virtual Machine |
-| `invalid_request` | Real service, wrong/impossible provider for it | `"Azure EC2 cost"` → EC2 is AWS-only |
-| `data_unavailable` | Real service, valid provider, no rows in this dataset | `"AWS S3 cost"` → S3 isn't in the CSV |
+| `clarification_needed` | Service or instance-type word spans multiple clouds, no provider named | `"VM cost"` → asks AWS EC2 or Azure Virtual Machine; `"large instance cost"` → asks AWS m5.2xlarge or Azure Standard_D4s_v5 |
+| `invalid_request` | Real service/instance type, wrong/impossible provider for it | `"Azure EC2 cost"` → EC2 is AWS-only; `"Azure VM on m5.2xlarge"` → that instance type is AWS-only |
+| `data_unavailable` | Real service, valid provider, no rows in this dataset | `"AWS S3 cost"` → S3 isn't in this dataset |
+| `unresolved_service` / `unresolved_instance_type` | Name wasn't recognized at all | `"show me Frobnicate cost"` |
 
 Regression contract for this pipeline: `tests/test_service_registry.py`,
-`tests/test_provider_resolver.py`, `tests/test_canonical_request.py`,
-`tests/test_validation.py` (unit tests per layer), and
+`tests/test_instance_type_registry.py`, `tests/test_provider_resolver.py`,
+`tests/test_canonical_request.py`, `tests/test_validation.py` (unit tests per layer), and
 `tests/test_regression_queries.py` (table-driven end-to-end cases — successes,
 clarifications, and rejections — plus two multi-turn scripted-client cases proving a
 clarification/rejection followed by a corrected follow-up actually reaches real data).
+
+### Inventory vs waste: `list_resources` vs `find_idle_resources`
+
+These are deliberately separate tools, not one tool with a flag, because they answer
+different questions and the system prompt routes to whichever the question actually
+implies (see `tests/test_regression_queries.py::test_list_resources_never_applies_idle_heuristics_end_to_end`):
+
+- **`list_resources`** — plain inventory. "What's running", "show our EC2 instances",
+  "what's stopped in Azure". Reports each resource's recorded `status` (`"running"` or
+  `"stopped"`) and `instance_type` as-is. Applies **no** utilization heuristics — cheap,
+  and answers "what exists," never "what's wasted."
+- **`find_idle_resources`** — waste judgment. "What's idle", "what can we cut". Applies
+  the CPU/attachment/invocation/last-access rules below to *classify* a resource as
+  waste. Do not use this for a plain "what's running" question; do not use
+  `list_resources` to answer an "idle" question — neither tool computes the other's answer.
 
 ## Requirements
 
@@ -97,9 +122,14 @@ cd FinOpsAgent
 uv sync          # creates .venv/ and installs pandas, chainlit, openai, ollama, pytest, python-dotenv
 ```
 
-`data/finops_combined.csv` must be present (16,560 rows, 90 days, AWS + Azure). It is
-already checked into this repo — do not regenerate it, since the demo depends on a
-specific seeded anomaly (see below).
+`aws_finops_data.xlsx` and `azure_finops_data.xlsx` (repo root) must be present — 9,630
+and 6,930 rows respectively, 90 days, one workbook per provider. They are already checked
+into this repo — do not regenerate them, since the demo depends on a specific seeded
+anomaly (see below). `status` in both workbooks is a uniform `"running"`/`"stopped"` for
+every service (simplified from an earlier archetype-specific scheme); only EC2/Virtual
+Machine rows actually vary between the two — every other service is always `"running"`,
+since stopped/deallocated states aren't modeled for storage, functions, or blobs in this
+synthetic dataset.
 
 ## Adding your OpenAI API key
 
@@ -143,9 +173,9 @@ uv run pytest tests/ -v
 
 Covers the deterministic tools (`detect_spike` finds the seeded 2026-06-16 anomaly with
 exactly 12 driver resources; `find_idle_resources` covers all four idle archetypes;
-`recommend` produces a positive total saving) and the agent loop's multi-turn tool-calling
-mechanics (via a scripted fake LLM client, independent of any real model's reasoning
-quality).
+`list_resources` returns a plain inventory with no idle heuristics applied; `recommend`
+produces a positive total saving) and the agent loop's multi-turn tool-calling mechanics
+(via a scripted fake LLM client, independent of any real model's reasoning quality).
 
 ### 3. Try the CLI
 
@@ -290,9 +320,9 @@ register("AWS", AWSAdapter())      # was register("AWS", SyntheticAdapter("AWS")
 register("Azure", AzureAdapter())  # was register("Azure", SyntheticAdapter("Azure"))
 ```
 
-No changes needed to `detect_spike`, `find_idle_resources`, `recommend`, the tool
-schemas, the agent loop, the resolver/validation layer, or the Chainlit UI — they only
-ever see `pandas.DataFrame` results shaped by the Protocol, never the underlying API or
+No changes needed to `detect_spike`, `find_idle_resources`, `list_resources`, `recommend`,
+the tool schemas, the agent loop, the resolver/validation layer, or the Chainlit UI — they
+only ever see `pandas.DataFrame` results shaped by the Protocol, never the underlying API or
 how adapters are constructed.
 
 | Rule (`find_idle_resources`) | v1 (synthetic) | v2 (real) |

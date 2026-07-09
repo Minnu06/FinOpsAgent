@@ -1,4 +1,4 @@
-from tools.finops_tools import cost_trend, detect_spike, find_idle_resources, recommend
+from tools.finops_tools import cost_trend, detect_spike, find_idle_resources, list_resources, recommend
 
 
 def test_detect_spike_finds_seeded_anomaly():
@@ -43,6 +43,46 @@ def test_recommend_empty_input():
     result = recommend([])
     assert result["recommendations"] == []
     assert result["total_monthly_saving_usd"] == 0.0
+
+
+def test_list_resources_returns_both_statuses_when_omitted():
+    result = list_resources(provider="AWS", service="EC2")
+    assert result["count"] > 0
+    statuses = {r["status"] for r in result["resources"]}
+    assert statuses <= {"running", "stopped"}
+
+
+def test_list_resources_status_filter_actually_filters():
+    running = list_resources(provider="AWS", service="EC2", status="running")
+    stopped = list_resources(provider="AWS", service="EC2", status="stopped")
+    assert all(r["status"] == "running" for r in running["resources"])
+    assert all(r["status"] == "stopped" for r in stopped["resources"])
+    assert running["count"] + stopped["count"] == list_resources(provider="AWS", service="EC2")["count"]
+
+
+def test_list_resources_instance_type_filter():
+    result = list_resources(provider="AWS", service="EC2", instance_type="m5.2xlarge")
+    assert result["count"] > 0
+    assert all(r["instance_type"] == "m5.2xlarge" for r in result["resources"])
+
+
+def test_list_resources_applies_no_idle_heuristics():
+    # The spike drivers are idle_compute per find_idle_resources' CPU rule,
+    # but list_resources has no utilization opinion — it must still report
+    # all of them, just tagged with their recorded status, not a waste reason.
+    spike = detect_spike()
+    idle = find_idle_resources(resource_ids=spike["driver_resource_ids"])
+    assert idle["count"] == len(spike["driver_resource_ids"])  # sanity: they are in fact idle
+
+    result = list_resources(resource_ids=spike["driver_resource_ids"])
+    assert result["count"] == len(spike["driver_resource_ids"])
+    assert all(r["status"] == "running" for r in result["resources"])
+    assert all("reason" not in r for r in result["resources"])
+
+
+def test_list_resources_no_candidates_in_scope():
+    result = list_resources(resource_ids=["not-a-real-id"])
+    assert result == {"resources": [], "count": 0}
 
 
 def test_cost_trend_basic():
