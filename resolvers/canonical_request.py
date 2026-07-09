@@ -23,9 +23,9 @@ from typing import Any
 # in the order they matter for readability (not evaluation order — to_kwargs
 # only includes fields whose value is not None).
 _TOOL_FIELDS: dict[str, tuple[str, ...]] = {
-    "cost_trend": ("start", "end", "service", "provider", "granularity"),
-    "detect_spike": ("lookback_days", "provider", "service"),
-    "find_idle_resources": ("provider", "service", "resource_ids"),
+    "cost_trend": ("start", "end", "service", "provider", "granularity", "region", "environment", "business_unit"),
+    "detect_spike": ("lookback_days", "provider", "service", "region", "environment", "business_unit"),
+    "find_idle_resources": ("provider", "service", "resource_ids", "region", "environment", "business_unit"),
     "recommend": ("resource_ids",),
 }
 

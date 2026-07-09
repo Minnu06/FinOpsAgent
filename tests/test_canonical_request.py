@@ -14,10 +14,35 @@ def test_to_kwargs_per_tool_field_projection():
     request = CanonicalRequest(
         provider="AWS", service="EC2", region="us-east-1", resource_ids=["i-1"], lookback_days=14
     )
-    assert request.to_kwargs("cost_trend") == {"service": "EC2", "provider": "AWS"}
-    assert request.to_kwargs("detect_spike") == {"lookback_days": 14, "provider": "AWS", "service": "EC2"}
-    assert request.to_kwargs("find_idle_resources") == {"provider": "AWS", "service": "EC2", "resource_ids": ["i-1"]}
+    assert request.to_kwargs("cost_trend") == {"service": "EC2", "provider": "AWS", "region": "us-east-1"}
+    assert request.to_kwargs("detect_spike") == {
+        "lookback_days": 14, "provider": "AWS", "service": "EC2", "region": "us-east-1"
+    }
+    assert request.to_kwargs("find_idle_resources") == {
+        "provider": "AWS", "service": "EC2", "resource_ids": ["i-1"], "region": "us-east-1"
+    }
     assert request.to_kwargs("recommend") == {"resource_ids": ["i-1"]}
+
+
+def test_to_kwargs_projects_environment_and_business_unit_for_every_filterable_tool():
+    # Regression: _TOOL_FIELDS was written in Phase 3 before cost_trend/
+    # detect_spike/find_idle_resources accepted region/environment/
+    # business_unit (added in Phase 4). Without these three in the table,
+    # a validated CanonicalRequest.environment/business_unit is silently
+    # dropped before the real tool call, so "Production-tagged" or
+    # "Finance business_unit" queries would resolve fine but filter nothing.
+    request = CanonicalRequest(
+        provider="AWS", service="EC2", environment="prod", business_unit="Finance"
+    )
+    assert request.to_kwargs("cost_trend") == {
+        "service": "EC2", "provider": "AWS", "environment": "prod", "business_unit": "Finance"
+    }
+    assert request.to_kwargs("detect_spike") == {
+        "provider": "AWS", "service": "EC2", "environment": "prod", "business_unit": "Finance"
+    }
+    assert request.to_kwargs("find_idle_resources") == {
+        "provider": "AWS", "service": "EC2", "environment": "prod", "business_unit": "Finance"
+    }
 
 
 def test_to_kwargs_unknown_tool_raises():
