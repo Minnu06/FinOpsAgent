@@ -8,10 +8,30 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from resolvers import service_registry
 from tools.finops_tools import cost_trend, detect_spike, find_idle_resources, recommend
 
-_SERVICE_ENUM = ["EC2", "EBS", "Lambda", "Virtual Machine", "Azure Functions", "Blob Storage"]
-_PROVIDER_ENUM = ["AWS", "Azure"]
+# Generated from the centralized service registry (resolvers/service_registry.py)
+# instead of a hand-typed list — covers the full catalog (17 services across
+# both providers), not just the 6 this dataset happens to have rows for. A
+# service the model asks for that isn't in the CSV still resolves through the
+# schema; resolvers/dispatch.py reports "data not available" rather than the
+# model being unable to name it in the first place.
+_SERVICE_ENUM = service_registry.all_concrete_names()
+_PROVIDER_ENUM = service_registry.all_providers()
+
+_REGION_PROPERTY = {
+    "type": "string",
+    "description": "Optional region filter, e.g. 'us-east-1' or 'eastus'.",
+}
+_ENVIRONMENT_PROPERTY = {
+    "type": "string",
+    "description": "Optional environment filter, e.g. 'prod', 'staging', 'test', 'dev'.",
+}
+_BUSINESS_UNIT_PROPERTY = {
+    "type": "string",
+    "description": "Optional business unit / tag filter, e.g. 'Finance', 'Platform', 'Security'.",
+}
 
 SCHEMAS: list[dict[str, Any]] = [
     {
@@ -42,7 +62,12 @@ SCHEMAS: list[dict[str, Any]] = [
                     "service": {
                         "type": "string",
                         "enum": _SERVICE_ENUM,
-                        "description": "Optional service filter.",
+                        "description": (
+                            "Optional service filter. If the user's own word is ambiguous "
+                            "about which cloud (e.g. 'VM', 'compute', 'storage', 'function'), "
+                            "pass that word as-is rather than picking a specific concrete "
+                            "service yourself — do not guess the cloud."
+                        ),
                     },
                     "provider": {
                         "type": "string",
@@ -54,6 +79,9 @@ SCHEMAS: list[dict[str, Any]] = [
                         "enum": ["day", "week", "month"],
                         "description": "Bucket size. Auto-upgrades to week if the range would exceed ~30 points.",
                     },
+                    "region": _REGION_PROPERTY,
+                    "environment": _ENVIRONMENT_PROPERTY,
+                    "business_unit": _BUSINESS_UNIT_PROPERTY,
                 },
                 "required": [],
             },
@@ -85,8 +113,16 @@ SCHEMAS: list[dict[str, Any]] = [
                     "service": {
                         "type": "string",
                         "enum": _SERVICE_ENUM,
-                        "description": "Optional service filter.",
+                        "description": (
+                            "Optional service filter. If the user's own word is ambiguous "
+                            "about which cloud (e.g. 'VM', 'compute', 'storage', 'function'), "
+                            "pass that word as-is rather than picking a specific concrete "
+                            "service yourself — do not guess the cloud."
+                        ),
                     },
+                    "region": _REGION_PROPERTY,
+                    "environment": _ENVIRONMENT_PROPERTY,
+                    "business_unit": _BUSINESS_UNIT_PROPERTY,
                 },
                 "required": [],
             },
@@ -114,7 +150,12 @@ SCHEMAS: list[dict[str, Any]] = [
                     "service": {
                         "type": "string",
                         "enum": _SERVICE_ENUM,
-                        "description": "Optional service filter.",
+                        "description": (
+                            "Optional service filter. If the user's own word is ambiguous "
+                            "about which cloud (e.g. 'VM', 'compute', 'storage', 'function'), "
+                            "pass that word as-is rather than picking a specific concrete "
+                            "service yourself — do not guess the cloud."
+                        ),
                     },
                     "resource_ids": {
                         "type": "array",
@@ -124,6 +165,9 @@ SCHEMAS: list[dict[str, Any]] = [
                             "driver_resource_ids from detect_spike. Omit to sweep all resources."
                         ),
                     },
+                    "region": _REGION_PROPERTY,
+                    "environment": _ENVIRONMENT_PROPERTY,
+                    "business_unit": _BUSINESS_UNIT_PROPERTY,
                 },
                 "required": [],
             },

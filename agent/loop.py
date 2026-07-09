@@ -10,6 +10,7 @@ from typing import Any, Callable
 from agent.llm import get_llm_client
 from agent.tool_schemas import REGISTRY, SCHEMAS
 from logging_setup import get_logger
+from resolvers.dispatch import resolve_and_execute
 from tools.finops_tools import data_date_range
 
 _log = get_logger(__name__)
@@ -34,13 +35,36 @@ INVESTIGATION ORDER (when investigating cost increases or waste):
 3. Check whether those resources are idle (find_idle_resources).
 4. Recommend fixes with savings (recommend).
 
-PROVIDER INFERENCE:
-- If the user names an AWS-only service (EC2, EBS, Lambda), filter to provider=AWS.
-- If the user names an Azure-only service (Virtual Machine, Azure Functions, Blob Storage),
-  filter to provider=Azure.
-- If the user says "cloud", "our bill", "everything", or is otherwise ambiguous about which
-  cloud, scan BOTH providers (omit the provider filter) and report a per-provider breakdown.
-- Never ask the user which cloud to check — infer it or scan both.
+PROVIDER & SERVICE RESOLUTION:
+Provider and service names are resolved deterministically before a tool call executes —
+you do not need to work out which cloud a service belongs to yourself, and you must NOT
+silently pick one when the user didn't say. If the user's own word for a service is
+ambiguous about which cloud (e.g. "VM", "instance", "compute", "server", "storage",
+"bucket", "blob", "function", "serverless", "kubernetes") and they did not also name a
+specific cloud, pass that same ambiguous word through as the `service` argument — even
+though it is not one of the exact enum values — instead of guessing a specific concrete
+service yourself. The resolver will ask the user to clarify if it's genuinely ambiguous;
+guessing defeats that safeguard. Only pass an exact concrete service name (EC2, Virtual
+Machine, S3, Blob Storage, etc.) when the user's own words already pin down the cloud
+(they named the concrete service, or named AWS/Azure explicitly, or your business
+context already makes it unambiguous). A tool call may come back with a `status` field
+instead of real data:
+- "clarification_needed": the service name could mean more than one cloud (e.g. "VM" ->
+  AWS EC2 or Azure Virtual Machine, "storage" -> S3 or Blob Storage). Relay the listed
+  `options` to the user as a question. Do not guess which one they meant, and do not
+  retry the call yourself — wait for the user to answer.
+- "invalid_request": the provider and service combination is not valid (e.g. Azure does
+  not offer EC2). State this plainly; do not retry with a different service or invent data.
+- "data_unavailable": the service is real, but this dataset has no cost data for it.
+  Say so plainly — do not estimate or fabricate a number.
+- "unresolved_service": the service name wasn't recognized. Ask the user to clarify which
+  service they mean.
+If the user names a service exclusive to one cloud (EC2/EBS/Lambda -> AWS;
+Virtual Machine/Azure Functions/Blob Storage and other Azure-only services -> Azure), its
+provider is inferred automatically — just pass the service, no need to also guess the
+provider. If the user says "cloud", "our bill", "everything", or names no specific
+service, omit the provider filter to scan both clouds; cost_trend returns a
+`by_provider` breakdown in that case so you don't need a second call to compare clouds.
 
 CONVERSATION CONTEXT:
 This conversation may include earlier turns. Use prior tool results already in the
@@ -181,7 +205,7 @@ def run_agent(
                     args["provider"] = provider
                 _log.debug("Calling %s(%s)", tc.name, args)
                 try:
-                    result = func(**args)
+                    result = resolve_and_execute(tc.name, args)
                 except Exception as exc:  # noqa: BLE001 - fed back to the model, not swallowed
                     _log.warning("Tool %s raised %s: %s", tc.name, type(exc).__name__, exc)
                     result = {"error": f"{type(exc).__name__}: {exc}"}

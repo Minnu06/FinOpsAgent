@@ -28,10 +28,11 @@ class MultiCloudAdapter:
         service: str | None = None,
         region: str | None = None,
         group_by: list[str] | None = None,
+        extra_filters: dict[str, str] | None = None,
     ) -> pd.DataFrame:
         _log.debug("MultiCloudAdapter.get_cost fanning out to %d adapters", len(self._adapters))
         frames = [
-            a.get_cost(start, end, service=service, region=region, group_by=group_by)
+            a.get_cost(start, end, service=service, region=region, group_by=group_by, extra_filters=extra_filters)
             for a in self._adapters
         ]
         result = pd.concat(frames, ignore_index=True)

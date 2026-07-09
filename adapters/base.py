@@ -23,6 +23,7 @@ class CloudAdapter(Protocol):
         service: str | None = None,
         region: str | None = None,
         group_by: list[str] | None = None,
+        extra_filters: dict[str, str] | None = None,
     ) -> pd.DataFrame: ...
 
     def get_utilization(self, resource_ids: list[str]) -> pd.DataFrame: ...
