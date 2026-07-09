@@ -102,7 +102,13 @@ uv run python -m agent.cli "why did EC2 cost go up?"
 
 Prints each tool call (name, arguments, JSON result) as it happens, then the final
 narrated answer. Good for verifying the investigation chain
-(`detect_spike → find_idle_resources → recommend`) without a browser.
+(`detect_spike → find_idle_resources → recommend`) without a browser. Add
+`--provider AWS` or `--provider Azure` to hard-scope the query to one cloud (same
+mechanism the UI dropdown uses):
+
+```bash
+uv run python -m agent.cli "why did cost go up?" --provider AWS
+```
 
 ### 4. Launch the prototype (Chainlit UI)
 
@@ -113,8 +119,15 @@ uv run chainlit run app.py
 Opens at **http://localhost:8000**. If that port is taken, pass `--port <n>`.
 
 - Chat interface with streamed responses.
-- Every tool call renders as a collapsible step showing its name, arguments, and JSON
-  result — this is the visible proof the system is agentic; it's never hidden.
+- **Provider dropdown**: click the settings (gear) icon to scope the whole chat to
+  **AWS**, **Azure**, or **Both** (default). This is a hard filter, not a hint — every
+  tool call in that session is forced to the selected provider's `provider` argument
+  regardless of what the model requests (see `test_provider_override_wins_over_model_request`
+  in `tests/test_agent_loop.py`).
+- **Visible tool-calling flow**: each user message opens a "🔎 Investigating" step, and
+  every tool call the agent makes renders as a nested step inside it — name, arguments,
+  and JSON result — in the order they were called. This is the visible proof the system
+  is agentic; it's never hidden.
 - Click the **"Scan for anomalies"** starter to trigger the proactive investigation
   prompt (same agent, same tools — only the first message differs).
 
