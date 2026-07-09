@@ -79,12 +79,16 @@ def _mode(series: pd.Series) -> Any:
     return clean.mode().iloc[0]
 
 
-def _extra_filters(environment: str | None, business_unit: str | None) -> dict[str, str] | None:
+def _extra_filters(
+    environment: str | None, business_unit: str | None, instance_type: str | None = None
+) -> dict[str, str] | None:
     filters = {}
     if environment is not None:
         filters["environment"] = environment
     if business_unit is not None:
         filters["business_unit"] = business_unit
+    if instance_type is not None:
+        filters["instance_type"] = instance_type
     return filters or None
 
 
@@ -105,6 +109,7 @@ def cost_trend(
     region: str | None = None,
     environment: str | None = None,
     business_unit: str | None = None,
+    instance_type: str | None = None,
 ) -> dict[str, Any]:
     """Daily (or auto-aggregated) cost totals with summary stats.
 
@@ -122,11 +127,11 @@ def cost_trend(
         else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
     )
     _log.info(
-        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s)",
-        start_d, end_d, service, provider, granularity, region, environment, business_unit,
+        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
+        start_d, end_d, service, provider, granularity, region, environment, business_unit, instance_type,
     )
     adapter = _adapter_for(provider)
-    filters = _extra_filters(environment, business_unit)
+    filters = _extra_filters(environment, business_unit, instance_type)
 
     df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=["date"], extra_filters=filters)
     df = df.groupby("date", as_index=False)["cost_usd"].sum().sort_values("date")
@@ -177,6 +182,7 @@ def detect_spike(
     region: str | None = None,
     environment: str | None = None,
     business_unit: str | None = None,
+    instance_type: str | None = None,
 ) -> dict[str, Any]:
     """Find the day cost anomalously increased and identify the resources driving it.
 
@@ -186,11 +192,11 @@ def detect_spike(
     use cost_trend for that.
     """
     _log.info(
-        "detect_spike(lookback_days=%s, provider=%s, service=%s, region=%s, environment=%s, business_unit=%s)",
-        lookback_days, provider, service, region, environment, business_unit,
+        "detect_spike(lookback_days=%s, provider=%s, service=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
+        lookback_days, provider, service, region, environment, business_unit, instance_type,
     )
     adapter = _adapter_for(provider)
-    filters = _extra_filters(environment, business_unit)
+    filters = _extra_filters(environment, business_unit, instance_type)
     max_date = _max_available_date()
     min_date = _min_available_date()
 
@@ -327,6 +333,7 @@ def find_idle_resources(
     region: str | None = None,
     environment: str | None = None,
     business_unit: str | None = None,
+    instance_type: str | None = None,
 ) -> dict[str, Any]:
     """Find resources that are running but wasted, per service archetype.
 
@@ -334,16 +341,17 @@ def find_idle_resources(
     zero-invocation functions, and cold blobs (last access > 90 days). Use
     after detect_spike to check whether the driver resources are idle, or on
     its own to sweep for waste. Do NOT use this to compute savings — use
-    recommend for that. `region`/`environment`/`business_unit` only narrow the
-    initial sweep — they're ignored when `resource_ids` is given explicitly.
+    recommend for that. `region`/`environment`/`business_unit`/`instance_type`
+    only narrow the initial sweep — they're ignored when `resource_ids` is
+    given explicitly.
     """
     _log.info(
-        "find_idle_resources(provider=%s, service=%s, resource_ids=%s, region=%s, environment=%s, business_unit=%s)",
+        "find_idle_resources(provider=%s, service=%s, resource_ids=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
         provider, service, f"{len(resource_ids)} given" if resource_ids else "none (sweeping all)",
-        region, environment, business_unit,
+        region, environment, business_unit, instance_type,
     )
     adapter = _adapter_for(provider)
-    filters = _extra_filters(environment, business_unit)
+    filters = _extra_filters(environment, business_unit, instance_type)
     max_date = _max_available_date()
     window_start = max_date - timedelta(days=_UTILIZATION_WINDOW_DAYS - 1)
     window_days = _UTILIZATION_WINDOW_DAYS
@@ -423,6 +431,73 @@ def find_idle_resources(
     reason_counts = {r: sum(1 for i in idle if i["reason"] == r) for r in dict.fromkeys(i["reason"] for i in idle)}
     _log.info("find_idle_resources -> %d idle of %d candidates checked, by reason: %s", len(idle), len(candidate_ids), reason_counts)
     return {"idle_resources": _cap_round_robin(idle, "reason", _MAX_RECORDS), "count": len(idle)}
+
+
+def list_resources(
+    provider: str | None = None,
+    service: str | None = None,
+    resource_ids: list[str] | None = None,
+    region: str | None = None,
+    environment: str | None = None,
+    business_unit: str | None = None,
+    instance_type: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """List resources with their current status, instance type, and monthly
+    cost — a plain inventory, with NO idle/waste heuristics applied.
+
+    Use for "what's running", "show our EC2 instances", "what's stopped in
+    Azure", "list resources tagged prod" — anything asking what exists or
+    its current state. Do NOT use this to find waste — use
+    find_idle_resources for "idle"/"unused"/"wasted" questions; unlike that
+    tool, this one never inspects CPU/invocations/last-access, it only
+    reports `status` ("running" or "stopped") as recorded. Omit `status` to
+    return both.
+    """
+    _log.info(
+        "list_resources(provider=%s, service=%s, resource_ids=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s, status=%s)",
+        provider, service, f"{len(resource_ids)} given" if resource_ids else "none (sweeping all)",
+        region, environment, business_unit, instance_type, status,
+    )
+    adapter = _adapter_for(provider)
+    filters = _extra_filters(environment, business_unit, instance_type)
+    max_date = _max_available_date()
+    window_start = max_date - timedelta(days=_UTILIZATION_WINDOW_DAYS - 1)
+
+    candidate_ids = list(dict.fromkeys(resource_ids)) if resource_ids else _candidate_resource_ids(
+        adapter, service, window_start, max_date, region=region, extra_filters=filters
+    )
+    if not candidate_ids:
+        _log.info("list_resources -> no candidate resources in scope")
+        return {"resources": [], "count": 0}
+
+    meta = adapter.get_metadata(candidate_ids).set_index("resource_id")
+
+    resources: list[dict[str, Any]] = []
+    for rid in candidate_ids:
+        if rid not in meta.index:
+            continue
+        row = meta.loc[rid]
+        if status is not None and row["status"] != status:
+            continue
+        resources.append(
+            {
+                "resource_id": rid,
+                "resource_name": row["resource_name"],
+                "service": row["service"],
+                "provider": row["provider"],
+                "region": row["region"],
+                "instance_type": row["instance_type"] if pd.notna(row["instance_type"]) else None,
+                "environment": row["environment"],
+                "business_unit": row["business_unit"],
+                "status": row["status"],
+                "monthly_cost_usd": _monthly_cost(adapter, rid, window_start, max_date),
+            }
+        )
+
+    resources.sort(key=lambda r: r["monthly_cost_usd"], reverse=True)
+    _log.info("list_resources -> %d of %d candidates matched (status=%s)", len(resources), len(candidate_ids), status)
+    return {"resources": resources[:_MAX_RECORDS], "count": len(resources)}
 
 
 def recommend(resource_ids: list[str]) -> dict[str, Any]:

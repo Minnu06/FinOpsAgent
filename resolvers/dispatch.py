@@ -58,6 +58,7 @@ def resolve_and_execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
         instance_type=args.get("instance_type"),
         environment=args.get("environment"),
         business_unit=args.get("business_unit"),
+        status=args.get("status"),
         start=args.get("start"),
         end=args.get("end"),
         granularity=args.get("granularity"),

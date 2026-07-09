@@ -19,7 +19,7 @@ from resolvers import service_registry
 _log = get_logger(__name__)
 
 
-def _option_label(provider: str, concrete_name: str) -> str:
+def option_label(provider: str, concrete_name: str) -> str:
     """Human-readable "<provider> <service>" label, without duplicating the
     provider when the concrete name already carries it (e.g. "Azure
     Functions" should read as "Azure Functions", not "Azure Azure Functions").
@@ -84,7 +84,7 @@ def resolve_provider_and_service(
         )
         return ProviderResolution(provider=candidate.provider, service=candidate.concrete_name, concept=match.concept)
 
-    options = tuple(_option_label(c.provider, c.concrete_name) for c in match.candidates)
+    options = tuple(option_label(c.provider, c.concrete_name) for c in match.candidates)
     _log.debug("resolve_provider_and_service(service=%r) -> clarification needed: %s", raw_service, options)
     return ProviderResolution(
         provider=None,

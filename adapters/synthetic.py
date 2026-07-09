@@ -9,7 +9,19 @@ from logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "finops_combined.csv"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Each provider now ships its own source-of-truth Excel workbook at the repo
+# root (aws_finops_data.xlsx / azure_finops_data.xlsx) instead of one combined
+# CSV under data/. Same cost/region/instance_type/environment/business_unit
+# values as the old data/finops_combined.csv — the only real difference is
+# `status`, simplified to a uniform "running"/"stopped" for every service
+# (the old CSV used archetype-specific values like "in-use"/"available"/
+# "active"/"deallocated").
+DEFAULT_DATA_PATHS: dict[str, Path] = {
+    "AWS": _REPO_ROOT / "aws_finops_data.xlsx",
+    "Azure": _REPO_ROOT / "azure_finops_data.xlsx",
+}
 
 _METADATA_COLUMNS = [
     "resource_id",
@@ -52,24 +64,28 @@ _UTILIZATION_COLUMNS = [
 ]
 
 
-def _load_csv(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, parse_dates=["date"])
-    df["date"] = df["date"].dt.date
+def _load_excel(path: Path) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    # Excel sheets can carry trailing fully-blank rows past the last real
+    # record; a blank resource_id/date is never valid data, so drop them
+    # rather than let them show up as phantom NaN-provider rows downstream.
+    df = df.dropna(subset=["resource_id", "date"]).reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"]).dt.date
     return df
 
 
 class SyntheticAdapter:
-    """CloudAdapter backed by the local finops_combined.csv fixture.
+    """CloudAdapter backed by a per-provider Excel workbook fixture
+    (aws_finops_data.xlsx / azure_finops_data.xlsx).
 
-    Filters the combined CSV down to a single provider. This is the only
-    class in the codebase that touches pandas file I/O directly; every
-    other layer consumes the DataFrames it returns.
+    This is the only class in the codebase that touches pandas file I/O
+    directly; every other layer consumes the DataFrames it returns.
     """
 
-    def __init__(self, provider: str, data_path: Path | str = DEFAULT_DATA_PATH) -> None:
+    def __init__(self, provider: str, data_path: Path | str | None = None) -> None:
         self.provider = provider
-        self._path = Path(data_path)
-        full = _load_csv(self._path)
+        self._path = Path(data_path) if data_path is not None else DEFAULT_DATA_PATHS[provider]
+        full = _load_excel(self._path)
         self.df = full[full["provider"] == provider].reset_index(drop=True)
         _log.debug("SyntheticAdapter(%s) loaded %d rows from %s", provider, len(self.df), self._path.name)
 

@@ -17,8 +17,9 @@ from datetime import date
 from typing import Any, Callable
 
 from logging_setup import get_logger
+from resolvers import instance_type_registry
 from resolvers.canonical_request import CanonicalRequest
-from resolvers.provider_resolver import resolve_provider_and_service
+from resolvers.provider_resolver import option_label, resolve_provider_and_service
 
 _log = get_logger(__name__)
 
@@ -34,7 +35,7 @@ class ValidationResult:
     `message` is meant to be relayed to the user as-is or narrated by the LLM.
     """
 
-    kind: str | None = None  # None (accept) | "invalid_request" | "data_unavailable" | "clarification_needed" | "unresolved_service"
+    kind: str | None = None  # None (accept) | "invalid_request" | "data_unavailable" | "clarification_needed" | "unresolved_service" | "unresolved_instance_type"
     message: str = ""
     request: CanonicalRequest | None = None
     options: tuple[str, ...] = field(default_factory=tuple)
@@ -53,6 +54,59 @@ def _availability_for(provider: str | None, available_services: AvailableService
     return union
 
 
+@dataclass(frozen=True)
+class _InstanceTypeResolution:
+    outcome: str  # "resolved" | "unresolved_instance_type" | "invalid_request" | "clarification_needed"
+    concrete_name: str | None = None
+    provider: str | None = None
+    message: str = ""
+    options: tuple[str, ...] = ()
+
+
+def _resolve_instance_type(raw_instance_type: str, known_provider: str | None) -> _InstanceTypeResolution:
+    """Resolve a raw instance-type string, reconciling it against a provider
+    already pinned by service resolution (if any). `known_provider` narrows
+    an otherwise-ambiguous size word (e.g. "large") down to one candidate the
+    same way an explicit provider narrows an ambiguous service; it never
+    overrides a provider the service already resolved — a mismatch is a
+    rejection, not a silent override.
+    """
+    match = instance_type_registry.resolve(raw_instance_type)
+    if not match.matched:
+        return _InstanceTypeResolution(
+            outcome="unresolved_instance_type",
+            message=(
+                f"I don't recognize the instance type {raw_instance_type!r}. "
+                "Could you clarify which AWS or Azure instance type you mean?"
+            ),
+        )
+
+    if known_provider is not None:
+        for candidate in match.candidates:
+            if candidate.provider == known_provider:
+                return _InstanceTypeResolution(
+                    outcome="resolved", concrete_name=candidate.concrete_name, provider=known_provider
+                )
+        return _InstanceTypeResolution(
+            outcome="invalid_request",
+            message=f"{known_provider} does not offer instance type {raw_instance_type!r} — that combination isn't valid.",
+        )
+
+    if len(match.candidates) == 1:
+        candidate = match.candidates[0]
+        return _InstanceTypeResolution(
+            outcome="resolved", concrete_name=candidate.concrete_name, provider=candidate.provider
+        )
+
+    options = tuple(option_label(c.provider, c.concrete_name) for c in match.candidates)
+    options_text = " or ".join(options)
+    return _InstanceTypeResolution(
+        outcome="clarification_needed",
+        message=f"{raw_instance_type!r} could mean {options_text} — which cloud do you mean?",
+        options=options,
+    )
+
+
 def validate(
     raw_service: str | None,
     raw_provider: str | None,
@@ -63,6 +117,7 @@ def validate(
     instance_type: str | None = None,
     environment: str | None = None,
     business_unit: str | None = None,
+    status: str | None = None,
     start: str | date | None = None,
     end: str | date | None = None,
     granularity: str | None = None,
@@ -101,20 +156,40 @@ def validate(
             _log.debug("validate: data_unavailable provider=%s service=%s", resolution.provider, resolution.service)
             return ValidationResult(kind="data_unavailable", message=message)
 
+    final_provider = resolution.provider
+    resolved_instance_type: str | None = None
+    if instance_type is not None and instance_type.strip():
+        it_resolution = _resolve_instance_type(instance_type, resolution.provider)
+        if it_resolution.outcome != "resolved":
+            _log.debug(
+                "validate: %s raw_instance_type=%r known_provider=%s",
+                it_resolution.outcome, instance_type, resolution.provider,
+            )
+            return ValidationResult(kind=it_resolution.outcome, message=it_resolution.message, options=it_resolution.options)
+        resolved_instance_type = it_resolution.concrete_name
+        # Naming an exact instance type pins the provider just like naming an
+        # exact service does — only takes effect when service resolution left
+        # it unset (scan-both case); a provider already resolved from the
+        # service was already reconciled inside _resolve_instance_type above.
+        final_provider = final_provider or it_resolution.provider
+
     request = CanonicalRequest(
-        provider=resolution.provider,
+        provider=final_provider,
         service=resolution.service,
         service_concept=resolution.concept,
         region=region,
         resource_ids=resource_ids,
-        instance_type=instance_type,
+        instance_type=resolved_instance_type,
         environment=environment,
         business_unit=business_unit,
+        status=status,
         start=start,
         end=end,
         granularity=granularity,
         lookback_days=lookback_days,
         filters=filters or {},
     )
-    _log.debug("validate: accepted provider=%s service=%s", resolution.provider, resolution.service)
+    _log.debug(
+        "validate: accepted provider=%s service=%s instance_type=%s", final_provider, resolution.service, resolved_instance_type
+    )
     return ValidationResult(kind=None, request=request)

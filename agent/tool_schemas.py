@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from resolvers import service_registry
-from tools.finops_tools import cost_trend, detect_spike, find_idle_resources, recommend
+from resolvers import instance_type_registry, service_registry
+from tools.finops_tools import cost_trend, detect_spike, find_idle_resources, list_resources, recommend
 
 # Generated from the centralized service registry (resolvers/service_registry.py)
 # instead of a hand-typed list — covers the full catalog (17 services across
@@ -19,6 +19,7 @@ from tools.finops_tools import cost_trend, detect_spike, find_idle_resources, re
 # model being unable to name it in the first place.
 _SERVICE_ENUM = service_registry.all_concrete_names()
 _PROVIDER_ENUM = service_registry.all_providers()
+_INSTANCE_TYPE_ENUM = instance_type_registry.all_concrete_names()
 
 _REGION_PROPERTY = {
     "type": "string",
@@ -31,6 +32,21 @@ _ENVIRONMENT_PROPERTY = {
 _BUSINESS_UNIT_PROPERTY = {
     "type": "string",
     "description": "Optional business unit / tag filter, e.g. 'Finance', 'Platform', 'Security'.",
+}
+_INSTANCE_TYPE_PROPERTY = {
+    "type": "string",
+    "enum": _INSTANCE_TYPE_ENUM,
+    "description": (
+        "Optional instance-type/size filter (compute services only), e.g. 'm5.2xlarge' or "
+        "'Standard_D4s_v5'. If the user's own word is a generic size ('large', 'xlarge', "
+        "'compute optimized') with no cloud named, pass that word as-is rather than picking a "
+        "specific concrete type yourself — do not guess the cloud."
+    ),
+}
+_STATUS_PROPERTY = {
+    "type": "string",
+    "enum": ["running", "stopped"],
+    "description": "Optional status filter. Omit to return both running and stopped resources.",
 }
 
 SCHEMAS: list[dict[str, Any]] = [
@@ -82,6 +98,7 @@ SCHEMAS: list[dict[str, Any]] = [
                     "region": _REGION_PROPERTY,
                     "environment": _ENVIRONMENT_PROPERTY,
                     "business_unit": _BUSINESS_UNIT_PROPERTY,
+                    "instance_type": _INSTANCE_TYPE_PROPERTY,
                 },
                 "required": [],
             },
@@ -123,6 +140,7 @@ SCHEMAS: list[dict[str, Any]] = [
                     "region": _REGION_PROPERTY,
                     "environment": _ENVIRONMENT_PROPERTY,
                     "business_unit": _BUSINESS_UNIT_PROPERTY,
+                    "instance_type": _INSTANCE_TYPE_PROPERTY,
                 },
                 "required": [],
             },
@@ -137,7 +155,10 @@ SCHEMAS: list[dict[str, Any]] = [
                 "unattached EBS volumes, zero-invocation functions, and cold blobs (no "
                 "access in 90+ days). Use after detect_spike to check whether driver "
                 "resources are idle, or standalone to sweep for waste. Do NOT use this to "
-                "compute savings — use recommend for that."
+                "compute savings — use recommend for that. Do NOT use this for a plain "
+                "'what's running'/'show our resources' question with no idle/waste framing — "
+                "use list_resources for that; it's much cheaper and doesn't apply any "
+                "utilization heuristics."
             ),
             "parameters": {
                 "type": "object",
@@ -168,6 +189,53 @@ SCHEMAS: list[dict[str, Any]] = [
                     "region": _REGION_PROPERTY,
                     "environment": _ENVIRONMENT_PROPERTY,
                     "business_unit": _BUSINESS_UNIT_PROPERTY,
+                    "instance_type": _INSTANCE_TYPE_PROPERTY,
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_resources",
+            "description": (
+                "List resources with their current status (running/stopped), instance type, "
+                "and monthly cost — a plain inventory with NO idle/waste heuristics applied. "
+                "Use for 'what's running', 'show our EC2 instances', 'what's stopped in "
+                "Azure', 'list resources tagged prod' — anything asking what exists or its "
+                "current state. Do NOT use this to find waste — use find_idle_resources for "
+                "'idle'/'unused'/'wasted' questions instead; do NOT use find_idle_resources "
+                "for a plain 'what's currently running' question — use this tool for that."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": _PROVIDER_ENUM,
+                        "description": "Optional provider filter. Omit to scan both clouds.",
+                    },
+                    "service": {
+                        "type": "string",
+                        "enum": _SERVICE_ENUM,
+                        "description": (
+                            "Optional service filter. If the user's own word is ambiguous "
+                            "about which cloud (e.g. 'VM', 'compute', 'storage', 'function'), "
+                            "pass that word as-is rather than picking a specific concrete "
+                            "service yourself — do not guess the cloud."
+                        ),
+                    },
+                    "resource_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional specific resource IDs to check. Omit to sweep all resources.",
+                    },
+                    "region": _REGION_PROPERTY,
+                    "environment": _ENVIRONMENT_PROPERTY,
+                    "business_unit": _BUSINESS_UNIT_PROPERTY,
+                    "instance_type": _INSTANCE_TYPE_PROPERTY,
+                    "status": _STATUS_PROPERTY,
                 },
                 "required": [],
             },
@@ -203,5 +271,6 @@ REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "cost_trend": cost_trend,
     "detect_spike": detect_spike,
     "find_idle_resources": find_idle_resources,
+    "list_resources": list_resources,
     "recommend": recommend,
 }

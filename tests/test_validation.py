@@ -87,6 +87,49 @@ def test_unrecognized_service_name():
     assert result.request is None
 
 
+def test_instance_type_exact_match_infers_provider_with_no_service_named():
+    result = validate(None, None, _available, instance_type="m5.2xlarge")
+    assert result.kind is None
+    assert result.request.provider == "AWS"
+    assert result.request.instance_type == "m5.2xlarge"
+
+
+def test_instance_type_ambiguous_size_word_needs_clarification():
+    result = validate(None, None, _available, instance_type="large")
+    assert result.kind == "clarification_needed"
+    assert result.request is None
+    assert set(result.options) == {"AWS m5.2xlarge", "Azure Standard_D4s_v5"}
+
+
+def test_instance_type_ambiguous_size_word_resolved_by_service_provider():
+    # "EC2" pins the provider to AWS, which narrows the otherwise-ambiguous
+    # "large" down to exactly one candidate instead of asking to clarify.
+    result = validate("EC2", None, _available, instance_type="large")
+    assert result.kind is None
+    assert result.request.provider == "AWS"
+    assert result.request.instance_type == "m5.2xlarge"
+
+
+def test_instance_type_mismatched_with_resolved_service_provider_is_rejected():
+    # EC2 resolves to AWS; Standard_D4s_v5 is an Azure-only instance type.
+    result = validate("EC2", None, _available, instance_type="Standard_D4s_v5")
+    assert result.kind == "invalid_request"
+    assert result.request is None
+    assert "AWS" in result.message
+
+
+def test_instance_type_mismatched_with_explicit_provider_is_rejected():
+    result = validate(None, "Azure", _available, instance_type="m5.large")
+    assert result.kind == "invalid_request"
+    assert result.request is None
+
+
+def test_unresolved_instance_type():
+    result = validate(None, None, _available, instance_type="banana.xlarge")
+    assert result.kind == "unresolved_instance_type"
+    assert result.request is None
+
+
 def test_scan_both_availability_check_never_calls_available_services_with_none():
     calls: list[str] = []
 
