@@ -48,10 +48,12 @@ def test_agent_loop_chains_detect_spike_idle_recommend(monkeypatch):
     def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
         calls.append(name)
 
-    answer = run_agent("why did cost go up?", on_tool_call=on_tool_call)
+    answer, history = run_agent("why did cost go up?", on_tool_call=on_tool_call)
 
     assert calls == ["detect_spike", "find_idle_resources", "recommend"]
     assert "Total monthly saving: $6634.0" == answer
+    assert history[0] == {"role": "user", "content": "why did cost go up?"}
+    assert history[-1] == {"role": "assistant", "content": answer}
 
 
 class _WrongProviderClient:
@@ -75,6 +77,49 @@ def test_provider_override_wins_over_model_request(monkeypatch):
     run_agent("why did cost go up?", on_tool_call=on_tool_call, provider="AWS", max_turns=1)
 
     assert executed_args[0]["provider"] == "AWS"
+
+
+class _HistoryInspectingClient:
+    """Records a snapshot of the messages list it was called with, to verify
+    history threading. Must copy, not just reference, `messages` — run_agent
+    keeps mutating that same list object after chat() returns.
+    """
+
+    def __init__(self) -> None:
+        self.seen_messages: list[dict[str, Any]] | None = None
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        self.seen_messages = list(messages)
+        return LLMResponse(content="ok", tool_calls=[])
+
+
+def test_prior_history_is_threaded_into_the_next_call(monkeypatch):
+    client = _HistoryInspectingClient()
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: client)
+
+    prior_history = [
+        {"role": "user", "content": "why did cost go up?"},
+        {"role": "assistant", "content": "It was EC2."},
+    ]
+
+    run_agent("what about Azure?", history=prior_history)
+
+    assert client.seen_messages is not None
+    assert client.seen_messages[0]["role"] == "system"
+    assert client.seen_messages[1] == prior_history[0]
+    assert client.seen_messages[2] == prior_history[1]
+    assert client.seen_messages[-1] == {"role": "user", "content": "what about Azure?"}
+
+
+def test_no_history_means_fresh_conversation(monkeypatch):
+    client = _HistoryInspectingClient()
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: client)
+
+    run_agent("why did cost go up?")
+
+    assert client.seen_messages is not None
+    assert len(client.seen_messages) == 2  # system + the new user message only
+    assert client.seen_messages[1] == {"role": "user", "content": "why did cost go up?"}
 
 
 def test_no_provider_override_leaves_model_choice_untouched(monkeypatch):

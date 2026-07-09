@@ -23,13 +23,22 @@ SCHEMAS: list[dict[str, Any]] = [
                 "pct_change_first_last) for a date range. Use for plain spend questions: "
                 "'what did we spend', 'show me the cost trend', 'how much did X cost'. "
                 "Do NOT use this to find anomalies or root causes — use detect_spike for "
-                "'why did cost go up'."
+                "'why did cost go up'. Omit start/end for 'recent'/'last 30 days'/'lately' "
+                "questions — the tool defaults to the most recent 30 days of available data. "
+                "Do NOT guess or compute dates yourself; only pass start/end if the user "
+                "names an explicit date or range."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start": {"type": "string", "description": "Start date, YYYY-MM-DD."},
-                    "end": {"type": "string", "description": "End date, YYYY-MM-DD."},
+                    "start": {
+                        "type": "string",
+                        "description": "Start date, YYYY-MM-DD. Omit to default to 30 days before end.",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "End date, YYYY-MM-DD. Omit to default to the most recent available date.",
+                    },
                     "service": {
                         "type": "string",
                         "enum": _SERVICE_ENUM,
@@ -46,7 +55,7 @@ SCHEMAS: list[dict[str, Any]] = [
                         "description": "Bucket size. Auto-upgrades to week if the range would exceed ~30 points.",
                     },
                 },
-                "required": ["start", "end"],
+                "required": [],
             },
         },
     },

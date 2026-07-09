@@ -10,6 +10,10 @@ message differs.
 A provider dropdown (gear icon / chat settings) lets the user hard-scope a
 session to AWS, Azure, or both — enforced deterministically in agent/loop.py,
 not left to the model's discretion.
+
+Conversation history persists across messages within a chat session (stored
+in cl.user_session), so follow-up questions have context. Each chat session
+gets its own log file under logs/ (see logging_setup.py).
 """
 
 from __future__ import annotations
@@ -22,6 +26,9 @@ import chainlit as cl
 from chainlit.input_widget import Select
 
 from agent.loop import run_agent
+from logging_setup import end_session, get_logger, set_current_session, start_session
+
+_log = get_logger(__name__)
 
 PROACTIVE_SCAN_PROMPT = (
     "Scan the last 30 days for cost anomalies and idle waste across all clouds and report findings."
@@ -71,6 +78,12 @@ async def set_starters() -> list[cl.Starter]:
 
 @cl.on_chat_start
 async def start() -> None:
+    session_id, handler = start_session(label="chainlit")
+    cl.user_session.set("log_session_id", session_id)
+    cl.user_session.set("log_handler", handler)
+    cl.user_session.set("history", [])
+    _log.info("Chat session started")
+
     await cl.ChatSettings(
         [
             Select(
@@ -85,18 +98,34 @@ async def start() -> None:
     await cl.Message(content=WELCOME_MESSAGE).send()
 
 
+@cl.on_chat_end
+async def on_chat_end() -> None:
+    session_id = cl.user_session.get("log_session_id")
+    handler = cl.user_session.get("log_handler")
+    if session_id and handler:
+        end_session(session_id, handler)
+
+
 @cl.on_settings_update
 async def on_settings_update(settings: dict[str, Any]) -> None:
     provider = settings.get("provider", "Both")
     cl.user_session.set("provider", provider)
+    _log.info("Provider scope changed to %s", provider)
     await cl.Message(content=f"Provider scope set to **{provider}**.").send()
 
 
 @cl.on_message
 async def main(message: cl.Message) -> None:
+    session_id = cl.user_session.get("log_session_id")
+    if session_id:
+        set_current_session(session_id)
+
     loop = asyncio.get_running_loop()
     provider_setting = cl.user_session.get("provider", "Both")
     provider = None if provider_setting == "Both" else provider_setting
+    history = cl.user_session.get("history", [])
+
+    _log.info('User query: "%s" (provider=%s, history_turns=%d)', message.content, provider_setting, len(history))
 
     tool_calls_made: list[str] = []
 
@@ -115,8 +144,11 @@ async def main(message: cl.Message) -> None:
             asyncio.run_coroutine_threadsafe(render_step(), loop).result()
 
         try:
-            answer = await asyncio.to_thread(run_agent, message.content, on_tool_call=on_tool_call, provider=provider)
+            answer, updated_history = await asyncio.to_thread(
+                run_agent, message.content, on_tool_call=on_tool_call, provider=provider, history=history
+            )
         except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
+            _log.exception("Agent error")
             investigation.output = f"Failed: {type(exc).__name__}: {exc}"
             await cl.Message(
                 content=(
@@ -127,11 +159,15 @@ async def main(message: cl.Message) -> None:
             ).send()
             return
 
+        cl.user_session.set("history", updated_history)
+
         investigation.output = (
             f"Called {len(tool_calls_made)} tool(s): {', '.join(tool_calls_made)}"
             if tool_calls_made
             else "Answered directly, no tools needed."
         )
+
+    _log.info("Final answer delivered (%d chars)", len(answer))
 
     msg = cl.Message(content="")
     await msg.send()

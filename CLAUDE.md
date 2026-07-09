@@ -19,6 +19,7 @@ Instructions for Claude Code when working in this repository.
 - NEVER touch any repo other than https://github.com/Minnu06/FinOpsAgent
 - NEVER commit secrets, API keys, or passwords
 - Always create a new branch for every task
+- while creating new branch the branch name should not present claude word
 - If remote doesn't match the repo above, STOP and ask the user
 
 ## Permission Rules — Hard Limits, never break these

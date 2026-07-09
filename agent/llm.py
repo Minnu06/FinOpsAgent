@@ -14,7 +14,11 @@ from typing import Any, Protocol
 
 from dotenv import load_dotenv
 
+from logging_setup import get_logger
+
 load_dotenv()
+
+_log = get_logger(__name__)
 
 
 @dataclass
@@ -93,8 +97,10 @@ class OpenAIClient:
             )
         self._model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self._client = OpenAI(api_key=api_key)
+        _log.info("LLM backend: OpenAI, model=%s", self._model)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        _log.debug("OpenAI request: %d messages, %d tools", len(messages), len(tools or []))
         resp = self._client.chat.completions.create(
             model=self._model,
             messages=_prepare_openai_messages(messages),
@@ -105,6 +111,10 @@ class OpenAIClient:
             ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments))
             for tc in (choice.tool_calls or [])
         ]
+        _log.debug(
+            "OpenAI response: content_len=%d, tool_calls=%s",
+            len(choice.content or ""), [tc.name for tc in tool_calls],
+        )
         return LLMResponse(content=choice.content, tool_calls=tool_calls)
 
 
@@ -114,8 +124,10 @@ class OllamaClient:
 
         self._ollama = ollama
         self._model = model or os.environ.get("OLLAMA_MODEL", "llama3.1")
+        _log.info("LLM backend: Ollama (local), model=%s", self._model)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        _log.debug("Ollama request: %d messages, %d tools", len(messages), len(tools or []))
         resp = self._ollama.chat(model=self._model, messages=_prepare_ollama_messages(messages), tools=tools or None)
         message = resp["message"]
         raw_calls = message.get("tool_calls") or []
@@ -125,6 +137,10 @@ class OllamaClient:
             if isinstance(args, str):
                 args = json.loads(args)
             tool_calls.append(ToolCall(id=tc.get("id", f"call_{i}"), name=tc["function"]["name"], arguments=args))
+        _log.debug(
+            "Ollama response: content_len=%d, tool_calls=%s",
+            len(message.get("content") or ""), [tc.name for tc in tool_calls],
+        )
         return LLMResponse(content=message.get("content"), tool_calls=tool_calls)
 
 
