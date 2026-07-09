@@ -14,18 +14,14 @@ from typing import Any
 
 import pandas as pd
 
+from adapters import factory
 from adapters.base import CloudAdapter
 from adapters.multi import MultiCloudAdapter
-from adapters.synthetic import SyntheticAdapter
 from logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-_AWS = SyntheticAdapter("AWS")
-_AZURE = SyntheticAdapter("Azure")
-_ALL = MultiCloudAdapter([_AWS, _AZURE])
-
-_ADAPTERS: dict[str, CloudAdapter] = {"AWS": _AWS, "Azure": _AZURE}
+_ALL = MultiCloudAdapter(factory.all_adapters())
 
 _COMPUTE_SERVICES = ("EC2", "Virtual Machine")
 _FUNCTION_SERVICES = ("Lambda", "Azure Functions")
@@ -47,17 +43,19 @@ _DEFAULT_TREND_WINDOW_DAYS = 30
 def _adapter_for(provider: str | None) -> CloudAdapter:
     if provider is None:
         return _ALL
-    if provider not in _ADAPTERS:
-        raise ValueError(f"Unknown provider {provider!r}; expected one of {sorted(_ADAPTERS)} or omit it to scan both.")
-    return _ADAPTERS[provider]
+    if provider not in factory.all_providers():
+        raise ValueError(
+            f"Unknown provider {provider!r}; expected one of {factory.all_providers()} or omit it to scan both."
+        )
+    return factory.get(provider)
 
 
 def _max_available_date() -> date:
-    return max(_AWS.df["date"].max(), _AZURE.df["date"].max())
+    return max(factory.get("AWS").df["date"].max(), factory.get("Azure").df["date"].max())
 
 
 def _min_available_date() -> date:
-    return min(_AWS.df["date"].min(), _AZURE.df["date"].min())
+    return min(factory.get("AWS").df["date"].min(), factory.get("Azure").df["date"].min())
 
 
 def data_date_range() -> tuple[date, date]:
@@ -81,6 +79,15 @@ def _mode(series: pd.Series) -> Any:
     return clean.mode().iloc[0]
 
 
+def _extra_filters(environment: str | None, business_unit: str | None) -> dict[str, str] | None:
+    filters = {}
+    if environment is not None:
+        filters["environment"] = environment
+    if business_unit is not None:
+        filters["business_unit"] = business_unit
+    return filters or None
+
+
 def _monthly_cost(adapter: CloudAdapter, resource_id: str, window_start: date, window_end: date) -> float:
     window_days = (window_end - window_start).days + 1
     cost = adapter.get_cost(window_start, window_end, group_by=["resource_id"])
@@ -95,13 +102,18 @@ def cost_trend(
     service: str | None = None,
     provider: str | None = None,
     granularity: str = "day",
+    region: str | None = None,
+    environment: str | None = None,
+    business_unit: str | None = None,
 ) -> dict[str, Any]:
     """Daily (or auto-aggregated) cost totals with summary stats.
 
     Use for plain spend questions ("what did we spend on X", "show me the
     trend"). Does NOT identify anomalies or drivers — use detect_spike for
     "why did cost go up". If start/end are omitted, defaults to the most
-    recent 30 days of available data — do not guess dates yourself.
+    recent 30 days of available data — do not guess dates yourself. When
+    `provider` is omitted (scanning both clouds), the result includes a
+    `by_provider` breakdown so a per-cloud split doesn't require a second call.
     """
     end_d = _to_date(end) if end is not None else _max_available_date()
     start_d = (
@@ -109,11 +121,22 @@ def cost_trend(
         if start is not None
         else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
     )
-    _log.info("cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s)", start_d, end_d, service, provider, granularity)
+    _log.info(
+        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s)",
+        start_d, end_d, service, provider, granularity, region, environment, business_unit,
+    )
     adapter = _adapter_for(provider)
+    filters = _extra_filters(environment, business_unit)
 
-    df = adapter.get_cost(start_d, end_d, service=service, group_by=["date"])
+    df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=["date"], extra_filters=filters)
     df = df.groupby("date", as_index=False)["cost_usd"].sum().sort_values("date")
+
+    by_provider: dict[str, float] | None = None
+    if provider is None:
+        provider_totals = adapter.get_cost(
+            start_d, end_d, service=service, region=region, group_by=["provider"], extra_filters=filters
+        )
+        by_provider = {row["provider"]: round(float(row["cost_usd"]), 2) for _, row in provider_totals.iterrows()}
 
     # Guarantee the ~30 record cap regardless of requested granularity/range.
     if granularity == "day" and len(df) > _MAX_RECORDS:
@@ -134,12 +157,16 @@ def cost_trend(
             (df["cost_usd"].iloc[-1] - df["cost_usd"].iloc[0]) / df["cost_usd"].iloc[0] * 100, 1
         )
 
-    _log.info("cost_trend -> total=$%.2f avg_daily=$%.2f pct_change=%.1f%% (%d points)", total, avg_daily, pct_change_first_last, len(series))
+    _log.info(
+        "cost_trend -> total=$%.2f avg_daily=$%.2f pct_change=%.1f%% (%d points) by_provider=%s",
+        total, avg_daily, pct_change_first_last, len(series), by_provider,
+    )
     return {
         "series": series[:_MAX_RECORDS],
         "total": total,
         "avg_daily": avg_daily,
         "pct_change_first_last": pct_change_first_last,
+        "by_provider": by_provider,
     }
 
 
@@ -147,6 +174,9 @@ def detect_spike(
     lookback_days: int = 30,
     provider: str | None = None,
     service: str | None = None,
+    region: str | None = None,
+    environment: str | None = None,
+    business_unit: str | None = None,
 ) -> dict[str, Any]:
     """Find the day cost anomalously increased and identify the resources driving it.
 
@@ -155,15 +185,22 @@ def detect_spike(
     standard deviations or a 25% jump. Do NOT use for plain spend totals —
     use cost_trend for that.
     """
-    _log.info("detect_spike(lookback_days=%s, provider=%s, service=%s)", lookback_days, provider, service)
+    _log.info(
+        "detect_spike(lookback_days=%s, provider=%s, service=%s, region=%s, environment=%s, business_unit=%s)",
+        lookback_days, provider, service, region, environment, business_unit,
+    )
     adapter = _adapter_for(provider)
+    filters = _extra_filters(environment, business_unit)
     max_date = _max_available_date()
     min_date = _min_available_date()
 
     window_start = max(min_date, max_date - timedelta(days=lookback_days - 1))
     query_start = max(min_date, window_start - timedelta(days=_SPIKE_TRAILING_WINDOW_DAYS))
 
-    raw = adapter.get_cost(query_start, max_date, service=service, group_by=["date", "provider", "service", "region"])
+    raw = adapter.get_cost(
+        query_start, max_date, service=service, region=region, group_by=["date", "provider", "service", "region"],
+        extra_filters=filters,
+    )
     if raw.empty:
         _log.info("detect_spike -> no cost data available for the given filters")
         return {"spike_date": None, "message": "No cost data available for the given filters."}
@@ -266,12 +303,19 @@ def _cap_round_robin(items: list[dict[str, Any]], key: str, limit: int) -> list[
 
 
 def _candidate_resource_ids(
-    adapter: CloudAdapter, service: str | None, window_start: date, window_end: date
+    adapter: CloudAdapter,
+    service: str | None,
+    window_start: date,
+    window_end: date,
+    region: str | None = None,
+    extra_filters: dict[str, str] | None = None,
 ) -> list[str]:
     services = [service] if service else list(_ALL_SERVICES)
     ids: set[str] = set()
     for svc in services:
-        df = adapter.get_cost(window_start, window_end, service=svc, group_by=["resource_id"])
+        df = adapter.get_cost(
+            window_start, window_end, service=svc, region=region, group_by=["resource_id"], extra_filters=extra_filters
+        )
         ids.update(df["resource_id"].tolist())
     return sorted(ids)
 
@@ -280,6 +324,9 @@ def find_idle_resources(
     provider: str | None = None,
     service: str | None = None,
     resource_ids: list[str] | None = None,
+    region: str | None = None,
+    environment: str | None = None,
+    business_unit: str | None = None,
 ) -> dict[str, Any]:
     """Find resources that are running but wasted, per service archetype.
 
@@ -287,19 +334,22 @@ def find_idle_resources(
     zero-invocation functions, and cold blobs (last access > 90 days). Use
     after detect_spike to check whether the driver resources are idle, or on
     its own to sweep for waste. Do NOT use this to compute savings — use
-    recommend for that.
+    recommend for that. `region`/`environment`/`business_unit` only narrow the
+    initial sweep — they're ignored when `resource_ids` is given explicitly.
     """
     _log.info(
-        "find_idle_resources(provider=%s, service=%s, resource_ids=%s)",
+        "find_idle_resources(provider=%s, service=%s, resource_ids=%s, region=%s, environment=%s, business_unit=%s)",
         provider, service, f"{len(resource_ids)} given" if resource_ids else "none (sweeping all)",
+        region, environment, business_unit,
     )
     adapter = _adapter_for(provider)
+    filters = _extra_filters(environment, business_unit)
     max_date = _max_available_date()
     window_start = max_date - timedelta(days=_UTILIZATION_WINDOW_DAYS - 1)
     window_days = _UTILIZATION_WINDOW_DAYS
 
     candidate_ids = list(dict.fromkeys(resource_ids)) if resource_ids else _candidate_resource_ids(
-        adapter, service, window_start, max_date
+        adapter, service, window_start, max_date, region=region, extra_filters=filters
     )
     if not candidate_ids:
         _log.info("find_idle_resources -> no candidate resources in scope")

@@ -80,6 +80,7 @@ class SyntheticAdapter:
         service: str | None = None,
         region: str | None = None,
         group_by: list[str] | None = None,
+        extra_filters: dict[str, str] | None = None,
     ) -> pd.DataFrame:
         df = self.df
         mask = (df["date"] >= start) & (df["date"] <= end)
@@ -87,12 +88,15 @@ class SyntheticAdapter:
             mask &= df["service"] == service
         if region is not None:
             mask &= df["region"] == region
+        if extra_filters:
+            for column, value in extra_filters.items():
+                mask &= df[column] == value
         df = df.loc[mask]
 
         result = df.groupby(group_by, as_index=False)["cost_usd"].sum() if group_by else df[_COST_COLUMNS].copy()
         _log.debug(
-            "%s.get_cost(start=%s, end=%s, service=%s, region=%s, group_by=%s) -> %d rows",
-            self.provider, start, end, service, region, group_by, len(result),
+            "%s.get_cost(start=%s, end=%s, service=%s, region=%s, group_by=%s, extra_filters=%s) -> %d rows",
+            self.provider, start, end, service, region, group_by, extra_filters, len(result),
         )
         return result
 
@@ -111,3 +115,6 @@ class SyntheticAdapter:
         result = latest[_METADATA_COLUMNS].copy()
         _log.debug("%s.get_metadata(%d resource_ids) -> %d rows", self.provider, len(resource_ids), len(result))
         return result
+
+    def list_services(self) -> list[str]:
+        return sorted(self.df["service"].unique())

@@ -133,3 +133,95 @@ def test_no_provider_override_leaves_model_choice_untouched(monkeypatch):
     run_agent("why did cost go up?", on_tool_call=on_tool_call, provider=None, max_turns=1)
 
     assert executed_args[0]["provider"] == "Azure"
+
+
+# --- Phase 4: resolvers/dispatch.py short-circuits, exercised through the full loop ---
+
+
+class _RelayStatusClient:
+    """Calls one tool with fixed arguments, then relays the tool result's
+    `status` field (if any) into its final answer — lets tests assert what
+    the LLM would actually see and could narrate to the user.
+    """
+
+    def __init__(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        self._tool_name = tool_name
+        self._arguments = arguments
+        self._step = 0
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        self._step += 1
+        if self._step == 1:
+            return LLMResponse(content=None, tool_calls=[ToolCall(id="1", name=self._tool_name, arguments=self._arguments)])
+        last_tool_result = json.loads(messages[-1]["content"])
+        options = last_tool_result.get("options")
+        return LLMResponse(content=f"status={last_tool_result.get('status')} options={options}", tool_calls=[])
+
+
+def test_impossible_combo_short_circuits_before_reaching_the_real_tool(monkeypatch):
+    client = _RelayStatusClient("cost_trend", {"provider": "Azure", "service": "EC2"})
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: client)
+
+    captured: list[dict[str, Any]] = []
+
+    def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        captured.append(result)
+
+    run_agent("show me Azure EC2 cost", on_tool_call=on_tool_call, max_turns=1)
+
+    result = captured[0]
+    assert result["status"] == "invalid_request"
+    assert "total" not in result  # never reached the real cost_trend
+    assert "Azure" in result["message"]
+
+
+def test_ambiguous_service_surfaces_clarification_options_through_the_loop(monkeypatch):
+    client = _RelayStatusClient("cost_trend", {"service": "vm"})
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: client)
+
+    captured: list[dict[str, Any]] = []
+
+    def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        captured.append(result)
+
+    answer, _ = run_agent("show me VM cost", on_tool_call=on_tool_call, max_turns=2)
+
+    assert captured[0]["status"] == "clarification_needed"
+    assert set(captured[0]["options"]) == {"AWS EC2", "Azure Virtual Machine"}
+    assert "AWS EC2" in answer and "Azure Virtual Machine" in answer
+
+
+def test_valid_but_unavailable_service_reports_data_unavailable_through_the_loop(monkeypatch):
+    client = _RelayStatusClient("cost_trend", {"provider": "AWS", "service": "S3"})
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: client)
+
+    captured: list[dict[str, Any]] = []
+
+    def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        captured.append(result)
+
+    run_agent("show me S3 cost", on_tool_call=on_tool_call, max_turns=1)
+
+    assert captured[0]["status"] == "data_unavailable"
+    assert "total" not in captured[0]
+
+
+def test_ui_provider_override_conflicting_with_requested_service_is_rejected(monkeypatch):
+    """Dropdown forces provider=AWS; the model still asks for an Azure-only
+    service. The forced provider wins (per test_provider_override_wins_...),
+    but the resulting AWS+Blob-Storage combination is genuinely impossible —
+    the resolver must catch this rather than silently returning empty data.
+    """
+    client = _RelayStatusClient("cost_trend", {"service": "Blob Storage"})
+    monkeypatch.setattr("agent.loop.get_llm_client", lambda: client)
+
+    captured: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def on_tool_call(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        captured.append((args, result))
+
+    run_agent("show blob storage cost", on_tool_call=on_tool_call, provider="AWS", max_turns=1)
+
+    args, result = captured[0]
+    assert args["provider"] == "AWS"
+    assert result["status"] == "invalid_request"
