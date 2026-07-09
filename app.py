@@ -2,7 +2,10 @@
 
 Renders every tool call as a visible cl.Step (name, arguments, JSON result),
 grouped under a parent "Investigating" step so the tool-calling flow reads as
-a sequence — this is the proof the system is agentic, so it is never hidden.
+a sequence — this is the proof the system is agentic. A "Debug: show tool
+calls" toggle (gear icon / chat settings, on by default) lets the user turn
+that detail off for a plain chatbot view; tool calls still happen and are
+still fully logged either way, only the on-screen rendering is suppressed.
 The final answer streams in afterward. A "Scan for anomalies" starter injects
 the proactive investigation prompt; it is the same agent loop, only the first
 message differs.
@@ -23,7 +26,7 @@ import json
 from typing import Any
 
 import chainlit as cl
-from chainlit.input_widget import Select
+from chainlit.input_widget import Select, Switch
 
 from agent.loop import run_agent
 from logging_setup import end_session, get_logger, set_current_session, start_session
@@ -40,7 +43,8 @@ WELCOME_MESSAGE = (
     "from a tool call — you'll see each investigation step below, so nothing on screen "
     "is a guess.\n\n"
     "Use the settings (gear icon) to scope this chat to a single cloud provider, or leave "
-    "it on **Both** to let the agent infer scope per question."
+    "it on **Both** to let the agent infer scope per question. Turn off **Debug: show tool "
+    "calls** there if you'd rather just see the final answer."
 )
 
 PROVIDER_OPTIONS = ["Both", "AWS", "Azure"]
@@ -91,10 +95,16 @@ async def start() -> None:
                 label="Cloud provider",
                 values=PROVIDER_OPTIONS,
                 initial_index=0,
-            )
+            ),
+            Switch(
+                id="debug_mode",
+                label="🔧 Debug: show tool calls",
+                initial=True,
+            ),
         ]
     ).send()
     cl.user_session.set("provider", "Both")
+    cl.user_session.set("debug_mode", True)
     await cl.Message(content=WELCOME_MESSAGE).send()
 
 
@@ -111,7 +121,48 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
     provider = settings.get("provider", "Both")
     cl.user_session.set("provider", provider)
     _log.info("Provider scope changed to %s", provider)
-    await cl.Message(content=f"Provider scope set to **{provider}**.").send()
+
+    debug_mode = settings.get("debug_mode", True)
+    cl.user_session.set("debug_mode", debug_mode)
+    _log.info("Debug mode set to %s", debug_mode)
+
+    await cl.Message(
+        content=f"Provider scope set to **{provider}**. Debug (tool-call detail) is **{'on' if debug_mode else 'off'}**."
+    ).send()
+
+
+async def _invoke_agent(
+    message: cl.Message, provider: str | None, history: list[dict[str, Any]], on_tool_call: Any
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """Runs the agent loop and reports an error to the user on failure.
+
+    Returns None (after already sending the error message) on failure, so
+    callers can just check for None and return — no error-handling duplicated
+    between the debug and non-debug code paths.
+    """
+    try:
+        return await asyncio.to_thread(
+            run_agent, message.content, on_tool_call=on_tool_call, provider=provider, history=history
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
+        _log.exception("Agent error")
+        await cl.Message(
+            content=(
+                f"⚠️ Agent error: {type(exc).__name__}: {exc}\n\n"
+                "Check that OPENAI_API_KEY is set (or switch LLM_PROVIDER=ollama in .env "
+                "for a fully local run)."
+            )
+        ).send()
+        return None
+
+
+async def _stream_answer(answer: str) -> None:
+    msg = cl.Message(content="")
+    await msg.send()
+    for word in answer.split(" "):
+        await msg.stream_token(word + " ")
+        await asyncio.sleep(0.01)
+    await msg.update()
 
 
 @cl.on_message
@@ -124,8 +175,26 @@ async def main(message: cl.Message) -> None:
     provider_setting = cl.user_session.get("provider", "Both")
     provider = None if provider_setting == "Both" else provider_setting
     history = cl.user_session.get("history", [])
+    debug_mode = cl.user_session.get("debug_mode", True)
 
-    _log.info('User query: "%s" (provider=%s, history_turns=%d)', message.content, provider_setting, len(history))
+    _log.info(
+        'User query: "%s" (provider=%s, history_turns=%d, debug_mode=%s)',
+        message.content, provider_setting, len(history), debug_mode,
+    )
+
+    if not debug_mode:
+        # Toggle off: run silently, no "Investigating" step at all — just the
+        # narrated answer, like a plain chatbot. Tool calls still happen and
+        # are still fully logged to logs/*.log; only the on-screen detail is
+        # suppressed.
+        result = await _invoke_agent(message, provider, history, on_tool_call=None)
+        if result is None:
+            return
+        answer, updated_history = result
+        cl.user_session.set("history", updated_history)
+        _log.info("Final answer delivered (%d chars)", len(answer))
+        await _stream_answer(answer)
+        return
 
     tool_calls_made: list[str] = []
 
@@ -143,22 +212,11 @@ async def main(message: cl.Message) -> None:
 
             asyncio.run_coroutine_threadsafe(render_step(), loop).result()
 
-        try:
-            answer, updated_history = await asyncio.to_thread(
-                run_agent, message.content, on_tool_call=on_tool_call, provider=provider, history=history
-            )
-        except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
-            _log.exception("Agent error")
-            investigation.output = f"Failed: {type(exc).__name__}: {exc}"
-            await cl.Message(
-                content=(
-                    f"⚠️ Agent error: {type(exc).__name__}: {exc}\n\n"
-                    "Check that OPENAI_API_KEY is set (or switch LLM_PROVIDER=ollama in .env "
-                    "for a fully local run)."
-                )
-            ).send()
+        result = await _invoke_agent(message, provider, history, on_tool_call)
+        if result is None:
+            investigation.output = "Failed — see error message above."
             return
-
+        answer, updated_history = result
         cl.user_session.set("history", updated_history)
 
         investigation.output = (
@@ -168,10 +226,4 @@ async def main(message: cl.Message) -> None:
         )
 
     _log.info("Final answer delivered (%d chars)", len(answer))
-
-    msg = cl.Message(content="")
-    await msg.send()
-    for word in answer.split(" "):
-        await msg.stream_token(word + " ")
-        await asyncio.sleep(0.01)
-    await msg.update()
+    await _stream_answer(answer)
