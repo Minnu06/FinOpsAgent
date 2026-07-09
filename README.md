@@ -28,7 +28,12 @@ than compute a date itself.
 ```
 adapters/       CloudAdapter Protocol + SyntheticAdapter (CSV) + MultiCloudAdapter (fan-out)
                 + factory.py (provider -> adapter registry)
-resolvers/      service_registry.py — canonical service catalog + synonym/fuzzy resolution
+resolvers/      service_registry.py    — canonical 17-service catalog + synonym/fuzzy resolution
+                provider_resolver.py   — explicit provider wins > unambiguous service infers it >
+                                          ambiguous cross-provider word clarifies > no service scans both
+                canonical_request.py   — CanonicalRequest + to_kwargs(tool_name) projection
+                validation.py          — combines the above + data-availability into accept/reject
+                dispatch.py            — resolve_and_execute(name, args): the seam agent/loop.py calls
 tools/          finops_tools.py — cost_trend, detect_spike, find_idle_resources, recommend
 agent/          llm.py (OpenAI/Ollama), tool_schemas.py, loop.py (tool-calling loop), cli.py
 app.py          Chainlit UI — visible cl.Step per tool call, streamed final answer
@@ -38,6 +43,44 @@ logging_setup.py  Per-session logging (logs/) shared by every layer above
 Only `adapters/` knows how data is fetched. Everything above it works with plain
 `pandas.DataFrame` results and provider-agnostic filters — this is the only layer that
 changes in v2 (see [Swapping in real clouds](#swapping-in-real-clouds-v2) below).
+
+### The resolver pipeline
+
+Every tool call the LLM makes passes through `resolvers/dispatch.py::resolve_and_execute`
+before touching real data (wired in at `agent/loop.py`'s single call site). This is
+deterministic Python logic, not prompt-only guidance — it gives the same answer every
+time for the same input, independent of whether the model "remembers" to ask a
+clarifying question:
+
+1. **`service_registry.resolve(raw)`** — exact concrete name (`"EC2"`) → service-specific
+   synonym (`"ebs volume"` → EBS) → ambiguous cross-provider concept word (`"vm"`,
+   `"storage"`, `"function"`) → fuzzy fallback (`difflib`) for typos.
+2. **`provider_resolver.resolve_provider_and_service(...)`** — an explicit provider (UI
+   dropdown or the user naming a cloud) always wins; a service that maps to exactly one
+   provider infers it directly; a service that maps to multiple providers with no
+   explicit provider asks for clarification instead of guessing; naming no service at
+   all scans both clouds (nothing to disambiguate).
+3. **`validation.validate(...)`** — combines the above with an *injected*
+   `available_services` callable (never an adapter import) to add a fourth outcome: a
+   service can be real per the registry but simply absent from this dataset.
+
+The result is either a validated `CanonicalRequest` (executed via `to_kwargs(tool_name)`
+projecting it onto the tool's existing flat kwargs) or a short-circuit `dict` with one of
+three `status` values, which the LLM is instructed to relay to the user rather than
+narrate around:
+
+| `status` | Meaning | Example |
+|---|---|---|
+| `clarification_needed` | Service word spans multiple clouds, no provider named | `"VM cost"` → asks AWS EC2 or Azure Virtual Machine |
+| `invalid_request` | Real service, wrong/impossible provider for it | `"Azure EC2 cost"` → EC2 is AWS-only |
+| `data_unavailable` | Real service, valid provider, no rows in this dataset | `"AWS S3 cost"` → S3 isn't in the CSV |
+
+Regression contract for this pipeline: `tests/test_service_registry.py`,
+`tests/test_provider_resolver.py`, `tests/test_canonical_request.py`,
+`tests/test_validation.py` (unit tests per layer), and
+`tests/test_regression_queries.py` (table-driven end-to-end cases — successes,
+clarifications, and rejections — plus two multi-turn scripted-client cases proving a
+clarification/rejection followed by a corrected follow-up actually reaches real data).
 
 ## Requirements
 
