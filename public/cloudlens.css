@@ -1,0 +1,55 @@
+/* CloudLens brand theme — overrides Chainlit's default CSS custom
+ * properties only (the documented, versioned theming surface: shadcn/ui
+ * style HSL tokens on :root / .dark). No DOM structure or component
+ * classes are targeted, so this survives Chainlit frontend upgrades and
+ * changes nothing about how the app behaves — purely a palette + a few
+ * cosmetic touches on top of the existing layout.
+ */
+
+:root {
+  /* Deep teal — reads "cost/cloud tooling", distinct from Chainlit's
+   * default pink/magenta brand color. */
+  --primary: 173 80% 32%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 173 80% 32%;
+
+  --sidebar-primary: 173 80% 32%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-ring: 173 80% 32%;
+
+  --accent: 173 45% 94%;
+  --accent-foreground: 173 80% 20%;
+
+  /* Slightly softer corners than the default 0.75rem for a calmer,
+   * more "dashboard" feel. */
+  --radius: 0.85rem;
+}
+
+.dark {
+  /* Brighter teal so it still pops against the dark background. */
+  --primary: 173 70% 45%;
+  --primary-foreground: 0 0% 8%;
+  --ring: 173 70% 45%;
+
+  --sidebar-primary: 173 70% 45%;
+  --sidebar-primary-foreground: 0 0% 8%;
+  --sidebar-ring: 173 70% 45%;
+
+  --accent: 173 30% 20%;
+  --accent-foreground: 173 70% 85%;
+}
+
+/* Scrollbars pick up the brand color instead of the generic gray. */
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--primary) / 0.35) !important;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--primary) / 0.55) !important;
+}
+
+/* Tool-call steps ("cl.Step" — cost_trend, detect_spike, etc.) get a
+ * hairline brand-colored left border so the agentic tool-calling flow
+ * reads as a distinct, connected sequence at a glance. */
+[data-step] {
+  border-left: 2px solid hsl(var(--primary) / 0.25);
+}
