@@ -27,7 +27,8 @@ TestResults.xml
 __pycache__/
 *.pyc
 .pytest_cache/
-.chainlit/
+.chainlit/*
+!.chainlit/config.toml
 .env
 *.egg-info/
 
