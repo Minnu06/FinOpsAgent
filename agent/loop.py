@@ -5,6 +5,7 @@ computes a dollar figure itself — every number comes from a tool result.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any, Callable
 
 from agent.llm import get_llm_client
@@ -22,18 +23,54 @@ with exact dollar savings.
 
 DATE CONTEXT:
 This dataset's most recent day with cost data is {max_date} — treat that as "today" for
-this conversation. Data is available from {min_date} to {max_date}. When the user says
-"last 30 days", "this month", "recently", "lately", or asks about "today", interpret it
-relative to {max_date}, NOT your own training cutoff or any other assumed date. Never
-state or imply a current year other than {max_year}. Tools that take dates (cost_trend)
-default to the last 30 days of available data when start/end are omitted — prefer omitting
-them over guessing a date yourself.
+this conversation. Data is available from {min_date} to {max_date} — {month_span} only, no other
+months or years. When the user says "last 30 days", "this month", "recently", "lately", or
+asks about "today", interpret it relative to {max_date}, NOT your own training cutoff or
+any other assumed date. Never state or imply a current year other than {max_year}. If the
+user names a month, quarter, or year outside {month_span} (earlier or later — e.g. "January",
+"last quarter", "this year" if that would reach past {max_date}), the relevant tool will
+report a "no_data" or empty result rather than a real number for that period; relay that
+plainly instead of computing, estimating, or guessing a figure for a period this dataset
+doesn't cover. Tools that take dates (cost_trend) default to the last 30 days of available
+data when start/end are omitted — prefer omitting them over guessing a date yourself.
+
+If the user names a relative window with an explicit length ("past 3 months", "last 6
+weeks", "the last 45 days"), do compute it yourself: start = {max_date} minus that length,
+end = {max_date}, and pass both explicitly as start/end — do not omit them and let the
+tool's internal 30-day default silently stand in for a longer window. Reserve omitting
+start/end for genuinely open-ended phrasing with no stated length ("recently", "lately",
+"this month" with no month named), where the 30-day default is the right answer. Either
+way, state the actual date range the tool used in your answer (from the tool result's own
+dates), not a restatement of the user's phrase — if a "past 3 months" request only returned
+30 days of data, say so rather than labeling a 30-day answer as "3 months."
 
 INVESTIGATION ORDER (when investigating cost increases or waste):
 1. Find the anomaly (detect_spike) or the spend picture (cost_trend).
 2. Identify the driver resources (detect_spike returns driver_resource_ids).
 3. Check whether those resources are idle (find_idle_resources).
 4. Recommend fixes with savings (recommend).
+
+Never call recommend with resource_ids you invented or guessed — only pass IDs that
+already appeared in an earlier tool result in this conversation (e.g. detect_spike's
+driver_resource_ids or find_idle_resources' idle_resources). If the user asks for savings
+or recommendations and no resource IDs are yet in context, call detect_spike and/or
+find_idle_resources first to discover real ones — do not skip straight to recommend on a
+guess.
+
+If the user names one or more specific resource IDs (an EC2 instance ID like "i-...", an
+EBS volume ID, a Lambda ARN, an Azure resource name) in a cost_trend question — "cost
+history for i-01340d8aaf25488c8", "what did this instance cost" — you MUST pass those
+exact IDs as cost_trend's resource_ids argument. Do not substitute service, provider, or
+instance_type filters instead, even though the resource's service/type is easy to infer —
+those filters aggregate across every other resource that shares them, not just the one
+resource named, and will produce a wrong, inflated total.
+
+SPIKE SCOPE: detect_spike's baseline_daily and spiked_daily are the cost of the specific
+service+region combination that is actually spiking (also returned as the service/region
+fields alongside them) — not the provider's total spend across every service and region.
+When you cite these figures, always name that scope (e.g. "AWS EC2 in us-east-1 rose from
+$318.61/day to $534.63/day"), never describe them as "AWS's total cost" or "the account's
+daily spend."
 
 TOOL SELECTION — INVENTORY VS WASTE (do not conflate these):
 - "what's running", "show our EC2 instances", "what's stopped in Azure", "list resources
@@ -80,6 +117,10 @@ tool call may come back with a `status` field instead of real data:
   Say so plainly — do not estimate or fabricate a number.
 - "unresolved_service" / "unresolved_instance_type": the name wasn't recognized. Ask the
   user to clarify which service or instance type they mean.
+- "invalid_argument": the tool itself rejected its arguments as malformed (an unparseable
+  date, a start date after the end date, a non-positive lookback_days, an unrecognized
+  status value). State the problem plainly and ask the user for a corrected value — do not
+  silently retry with a guessed correction.
 If the user names a service or instance type exclusive to one cloud (EC2/EBS/Lambda/
 m5.2xlarge -> AWS; Virtual Machine/Azure Functions/Blob Storage/Standard_D4s_v5 and other
 Azure-only values -> Azure), its provider is inferred automatically — just pass the value,
@@ -94,11 +135,27 @@ conversation to answer follow-up questions ("what about Azure?", "how much would
 save?") instead of re-investigating from scratch — but still call a tool if the follow-up
 needs a number that hasn't already appeared in this conversation.
 
+TOOL ERRORS AND EMPTY RESULTS:
+If a tool result contains an "error" key, the call failed unexpectedly — this is not a
+validation rejection, something went wrong executing it. Tell the user plainly that the
+request could not be completed right now; do not guess what the data would have shown,
+and do not retry the same call more than once. A result with no "status" key is real data
+— narrate it normally. A result that DOES have a "status" key is never real data to
+narrate, regardless of which tool produced it or what other fields are alongside it —
+treat "no_data" / "no_anomaly" exactly like an empty result (state plainly that nothing
+was found), and treat "invalid_argument" like the other rejection statuses above (state
+the problem, ask for a correction). Never invent or extrapolate a number to fill the gap.
+
 HARD RULE — NEVER VIOLATE:
 You must never state a dollar figure, percentage, resource count, or resource ID that did
 not appear in a tool result. You do not do arithmetic yourself — the tools already computed
 exact numbers. If a tool returned nothing or an empty list, say so plainly; do not guess or
 extrapolate. Every number you say must be traceable to a tool call in this conversation.
+Reproduce resource IDs and ARNs exactly, character for character, from the tool result —
+never abbreviate, ellipsize, or retype a long identifier from memory; copy it as given. When
+a tool result includes a total (e.g. recommend's total_monthly_saving_usd), state that
+number verbatim — never recompute or re-sum a total yourself from a subset of the line
+items you chose to display.
 
 ANSWER FORMAT:
 1. One paragraph stating the root cause (or the direct answer if it's a simple lookup).
@@ -116,10 +173,41 @@ _PARAM_TYPES: dict[str, dict[str, str]] = {
 }
 
 
+def _month_span_label(min_date: date, max_date: date) -> str:
+    """Human-readable list of calendar months the dataset actually spans,
+    e.g. "April, May, and June 2026" — derived from the real data range each
+    time rather than hardcoded, so this stays correct if the dataset is ever
+    regenerated with a different window. Spells out the year per-month if the
+    span crosses a year boundary (e.g. "November 2024, December 2024,
+    January 2025, and February 2025") rather than tagging every month with
+    just `max_date.year`, which would misdate the earlier months.
+    """
+    months: list[tuple[str, int]] = []
+    cursor = min_date.replace(day=1)
+    last = max_date.replace(day=1)
+    while cursor <= last:
+        months.append((cursor.strftime("%B"), cursor.year))
+        cursor = date(cursor.year + 1, 1, 1) if cursor.month == 12 else date(cursor.year, cursor.month + 1, 1)
+
+    single_year = len({year for _, year in months}) == 1
+    names = [name for name, _ in months] if single_year else [f"{name} {year}" for name, year in months]
+
+    if len(names) == 1:
+        joined = names[0]
+    elif len(names) == 2:
+        joined = " and ".join(names)
+    else:
+        joined = ", ".join(names[:-1]) + f", and {names[-1]}"
+    return f"{joined} {max_date.year}" if single_year else joined
+
+
 def _build_system_prompt(provider: str | None) -> str:
     min_date, max_date = data_date_range()
     content = _SYSTEM_PROMPT_TEMPLATE.format(
-        min_date=min_date.isoformat(), max_date=max_date.isoformat(), max_year=max_date.year
+        min_date=min_date.isoformat(),
+        max_date=max_date.isoformat(),
+        max_year=max_date.year,
+        month_span=_month_span_label(min_date, max_date),
     )
     if provider:
         content += (
@@ -166,6 +254,24 @@ def _tool_message(call_id: str, name: str, result: dict[str, Any]) -> dict[str, 
     }
 
 
+_FALLBACK_NOTICE = (
+    "_(Note: OpenAI was unavailable during this conversation, so this answer was "
+    "generated using the local Ollama fallback model.)_\n\n"
+)
+
+
+def _finalize_answer(content: str | None, client: Any) -> str:
+    """Prepend a visible fallback notice if `client` failed over to Ollama
+    mid-conversation. Reuses the existing answer-text return path — the CLI
+    and Chainlit UI both already render this string, so no separate UI
+    plumbing is needed to surface that a fallback occurred.
+    """
+    answer = content or ""
+    if getattr(client, "used_fallback", False):
+        answer = _FALLBACK_NOTICE + answer
+    return answer
+
+
 def run_agent(
     user_message: str,
     on_tool_call: ToolCallHook | None = None,
@@ -202,7 +308,7 @@ def run_agent(
         if not response.tool_calls:
             _log.info("Turn %d: final answer (%d chars), no further tool calls", turn, len(response.content or ""))
             messages.append({"role": "assistant", "content": response.content})
-            return response.content or "", messages[1:]
+            return _finalize_answer(response.content, client), messages[1:]
 
         _log.info("Turn %d: model requested %d tool call(s): %s", turn, len(response.tool_calls), [tc.name for tc in response.tool_calls])
         messages.append(
@@ -239,6 +345,9 @@ def run_agent(
 
     _log.warning("Max turns (%d) reached without a final answer", max_turns)
     return (
-        "I wasn't able to reach a final answer within the tool-call budget. Please try narrowing the question.",
+        _finalize_answer(
+            "I wasn't able to reach a final answer within the tool-call budget. Please try narrowing the question.",
+            client,
+        ),
         messages[1:],
     )

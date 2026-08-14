@@ -72,6 +72,17 @@ def _to_date(value: str | date) -> date:
     return date.fromisoformat(value)
 
 
+def _invalid_argument(message: str) -> dict[str, Any]:
+    """Structured error for a tool argument that's syntactically or
+    semantically invalid (unparseable date, reversed range, out-of-bounds
+    lookback_days, an enum value that slipped past the schema) — returned
+    directly instead of letting a parsing exception propagate to the agent
+    loop's generic except block, or silently producing a misleading
+    zero/empty result for what was actually bad input.
+    """
+    return {"status": "invalid_argument", "message": message}
+
+
 def _mode(series: pd.Series) -> Any:
     clean = series.dropna()
     if clean.empty:
@@ -110,6 +121,7 @@ def cost_trend(
     environment: str | None = None,
     business_unit: str | None = None,
     instance_type: str | None = None,
+    resource_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Daily (or auto-aggregated) cost totals with summary stats.
 
@@ -119,28 +131,69 @@ def cost_trend(
     recent 30 days of available data — do not guess dates yourself. When
     `provider` is omitted (scanning both clouds), the result includes a
     `by_provider` breakdown so a per-cloud split doesn't require a second call.
+    Pass `resource_ids` to scope the trend to one or a few specific resources
+    (e.g. "cost history for i-01340d8aaf25488c8") — without it, `instance_type`/
+    `environment`/`business_unit` filters still aggregate across every
+    resource matching that filter, not just the one the user asked about.
     """
-    end_d = _to_date(end) if end is not None else _max_available_date()
-    start_d = (
-        _to_date(start)
-        if start is not None
-        else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
-    )
+    try:
+        end_d = _to_date(end) if end is not None else _max_available_date()
+    except (ValueError, TypeError):
+        return _invalid_argument(f"end date {end!r} is not a valid date (expected YYYY-MM-DD).")
+    try:
+        start_d = (
+            _to_date(start)
+            if start is not None
+            else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
+        )
+    except (ValueError, TypeError):
+        return _invalid_argument(f"start date {start!r} is not a valid date (expected YYYY-MM-DD).")
+
+    if start_d > end_d:
+        return _invalid_argument(f"start date {start_d.isoformat()} is after end date {end_d.isoformat()}.")
+    if granularity not in ("day", "week", "month"):
+        return _invalid_argument(f"granularity {granularity!r} must be one of 'day', 'week', 'month'.")
+
     _log.info(
-        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
+        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s, resource_ids=%s)",
         start_d, end_d, service, provider, granularity, region, environment, business_unit, instance_type,
+        f"{len(resource_ids)} given" if resource_ids else "none",
     )
     adapter = _adapter_for(provider)
     filters = _extra_filters(environment, business_unit, instance_type)
 
-    df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=["date"], extra_filters=filters)
+    # When scoping to specific resources, fetch at resource_id granularity so
+    # we can filter to exactly those resources before collapsing to a daily
+    # total — group_by=["date"] alone would sum every resource matching the
+    # broader filters (e.g. every same-instance_type resource), not just the
+    # ones asked for.
+    date_group_by = ["date", "resource_id"] if resource_ids else ["date"]
+    df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=date_group_by, extra_filters=filters)
+    if resource_ids:
+        df = df[df["resource_id"].isin(resource_ids)]
     df = df.groupby("date", as_index=False)["cost_usd"].sum().sort_values("date")
+
+    if df.empty:
+        _log.info("cost_trend -> no cost data available for the given filters")
+        return {
+            "status": "no_data",
+            "message": "No cost data found for the given filters and date range.",
+            "series": [],
+            "total": 0.0,
+            "avg_daily": 0.0,
+            "pct_change_first_last": 0.0,
+            "by_provider": None,
+        }
 
     by_provider: dict[str, float] | None = None
     if provider is None:
+        provider_group_by = ["provider", "resource_id"] if resource_ids else ["provider"]
         provider_totals = adapter.get_cost(
-            start_d, end_d, service=service, region=region, group_by=["provider"], extra_filters=filters
+            start_d, end_d, service=service, region=region, group_by=provider_group_by, extra_filters=filters
         )
+        if resource_ids:
+            provider_totals = provider_totals[provider_totals["resource_id"].isin(resource_ids)]
+            provider_totals = provider_totals.groupby("provider", as_index=False)["cost_usd"].sum()
         by_provider = {row["provider"]: round(float(row["cost_usd"]), 2) for _, row in provider_totals.iterrows()}
 
     # Guarantee the ~30 record cap regardless of requested granularity/range.
@@ -151,7 +204,13 @@ def cost_trend(
         freq = "W" if granularity == "week" else "MS"
         indexed = df.set_index(pd.to_datetime(df["date"]))["cost_usd"]
         resampled = indexed.resample(freq).sum()
-        df = pd.DataFrame({"date": resampled.index.date, "cost_usd": resampled.values})
+        # "W" labels each bucket with its calendar-closing Sunday, which can
+        # fall after end_d for the final, partial week (e.g. only 2 real days
+        # of data land in a bucket labeled a week later) — the sum is still
+        # exactly the real data in range, but the label must never claim a
+        # date beyond what was actually requested.
+        dates = [min(d, end_d) for d in resampled.index.date]
+        df = pd.DataFrame({"date": dates, "cost_usd": resampled.values})
 
     series = [{"date": d.isoformat(), "cost": round(float(c), 2)} for d, c in zip(df["date"], df["cost_usd"])]
     total = round(float(df["cost_usd"].sum()), 2)
@@ -191,6 +250,9 @@ def detect_spike(
     standard deviations or a 25% jump. Do NOT use for plain spend totals —
     use cost_trend for that.
     """
+    if lookback_days < 1:
+        return _invalid_argument(f"lookback_days must be a positive integer, got {lookback_days}.")
+
     _log.info(
         "detect_spike(lookback_days=%s, provider=%s, service=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
         lookback_days, provider, service, region, environment, business_unit, instance_type,
@@ -209,7 +271,7 @@ def detect_spike(
     )
     if raw.empty:
         _log.info("detect_spike -> no cost data available for the given filters")
-        return {"spike_date": None, "message": "No cost data available for the given filters."}
+        return {"status": "no_data", "spike_date": None, "message": "No cost data available for the given filters."}
 
     full_dates = pd.date_range(query_start, max_date, freq="D").date
     report_dates = pd.date_range(window_start, max_date, freq="D").date
@@ -247,7 +309,7 @@ def detect_spike(
 
     if best is None:
         _log.info("detect_spike -> no anomalies detected in the given window")
-        return {"spike_date": None, "message": "No anomalies detected in the given window."}
+        return {"status": "no_anomaly", "spike_date": None, "message": "No anomalies detected in the given window."}
 
     spike_date = best["date"]
     driver_adapter = _adapter_for(best["provider"])
@@ -454,6 +516,9 @@ def list_resources(
     reports `status` ("running" or "stopped") as recorded. Omit `status` to
     return both.
     """
+    if status is not None and status not in ("running", "stopped"):
+        return _invalid_argument(f"status must be 'running' or 'stopped', got {status!r}.")
+
     _log.info(
         "list_resources(provider=%s, service=%s, resource_ids=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s, status=%s)",
         provider, service, f"{len(resource_ids)} given" if resource_ids else "none (sweeping all)",
@@ -583,10 +648,16 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
         if rec is not None:
             rec = {"resource_id": rid, "service": svc, "monthly_saving_usd": saving, **rec}
             recommendations.append(rec)
-            total_saving += saving
 
-    _log.info("recommend -> %d recommendation(s), total_monthly_saving_usd=$%.2f", len(recommendations), total_saving)
+    # total_monthly_saving_usd must sum exactly the line items being returned
+    # below, not every resource evaluated — capping recommendations to
+    # _MAX_RECORDS while summing over the uncapped list would report a total
+    # that doesn't match what the caller can actually see and add up itself.
+    capped_recommendations = _cap_round_robin(recommendations, "action", _MAX_RECORDS)
+    total_saving = round(sum(r["monthly_saving_usd"] for r in capped_recommendations), 2)
+
+    _log.info("recommend -> %d recommendation(s), total_monthly_saving_usd=$%.2f", len(capped_recommendations), total_saving)
     return {
-        "recommendations": _cap_round_robin(recommendations, "action", _MAX_RECORDS),
-        "total_monthly_saving_usd": round(total_saving, 2),
+        "recommendations": capped_recommendations,
+        "total_monthly_saving_usd": total_saving,
     }
