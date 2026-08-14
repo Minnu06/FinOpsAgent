@@ -34,6 +34,16 @@ plainly instead of computing, estimating, or guessing a figure for a period this
 doesn't cover. Tools that take dates (cost_trend) default to the last 30 days of available
 data when start/end are omitted — prefer omitting them over guessing a date yourself.
 
+If the user names a relative window with an explicit length ("past 3 months", "last 6
+weeks", "the last 45 days"), do compute it yourself: start = {max_date} minus that length,
+end = {max_date}, and pass both explicitly as start/end — do not omit them and let the
+tool's internal 30-day default silently stand in for a longer window. Reserve omitting
+start/end for genuinely open-ended phrasing with no stated length ("recently", "lately",
+"this month" with no month named), where the 30-day default is the right answer. Either
+way, state the actual date range the tool used in your answer (from the tool result's own
+dates), not a restatement of the user's phrase — if a "past 3 months" request only returned
+30 days of data, say so rather than labeling a 30-day answer as "3 months."
+
 INVESTIGATION ORDER (when investigating cost increases or waste):
 1. Find the anomaly (detect_spike) or the spend picture (cost_trend).
 2. Identify the driver resources (detect_spike returns driver_resource_ids).
