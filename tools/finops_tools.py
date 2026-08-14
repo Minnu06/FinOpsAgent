@@ -72,6 +72,17 @@ def _to_date(value: str | date) -> date:
     return date.fromisoformat(value)
 
 
+def _invalid_argument(message: str) -> dict[str, Any]:
+    """Structured error for a tool argument that's syntactically or
+    semantically invalid (unparseable date, reversed range, out-of-bounds
+    lookback_days, an enum value that slipped past the schema) — returned
+    directly instead of letting a parsing exception propagate to the agent
+    loop's generic except block, or silently producing a misleading
+    zero/empty result for what was actually bad input.
+    """
+    return {"status": "invalid_argument", "message": message}
+
+
 def _mode(series: pd.Series) -> Any:
     clean = series.dropna()
     if clean.empty:
@@ -120,12 +131,24 @@ def cost_trend(
     `provider` is omitted (scanning both clouds), the result includes a
     `by_provider` breakdown so a per-cloud split doesn't require a second call.
     """
-    end_d = _to_date(end) if end is not None else _max_available_date()
-    start_d = (
-        _to_date(start)
-        if start is not None
-        else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
-    )
+    try:
+        end_d = _to_date(end) if end is not None else _max_available_date()
+    except (ValueError, TypeError):
+        return _invalid_argument(f"end date {end!r} is not a valid date (expected YYYY-MM-DD).")
+    try:
+        start_d = (
+            _to_date(start)
+            if start is not None
+            else max(_min_available_date(), end_d - timedelta(days=_DEFAULT_TREND_WINDOW_DAYS - 1))
+        )
+    except (ValueError, TypeError):
+        return _invalid_argument(f"start date {start!r} is not a valid date (expected YYYY-MM-DD).")
+
+    if start_d > end_d:
+        return _invalid_argument(f"start date {start_d.isoformat()} is after end date {end_d.isoformat()}.")
+    if granularity not in ("day", "week", "month"):
+        return _invalid_argument(f"granularity {granularity!r} must be one of 'day', 'week', 'month'.")
+
     _log.info(
         "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
         start_d, end_d, service, provider, granularity, region, environment, business_unit, instance_type,
@@ -135,6 +158,18 @@ def cost_trend(
 
     df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=["date"], extra_filters=filters)
     df = df.groupby("date", as_index=False)["cost_usd"].sum().sort_values("date")
+
+    if df.empty:
+        _log.info("cost_trend -> no cost data available for the given filters")
+        return {
+            "status": "no_data",
+            "message": "No cost data found for the given filters and date range.",
+            "series": [],
+            "total": 0.0,
+            "avg_daily": 0.0,
+            "pct_change_first_last": 0.0,
+            "by_provider": None,
+        }
 
     by_provider: dict[str, float] | None = None
     if provider is None:
@@ -191,6 +226,9 @@ def detect_spike(
     standard deviations or a 25% jump. Do NOT use for plain spend totals —
     use cost_trend for that.
     """
+    if lookback_days < 1:
+        return _invalid_argument(f"lookback_days must be a positive integer, got {lookback_days}.")
+
     _log.info(
         "detect_spike(lookback_days=%s, provider=%s, service=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
         lookback_days, provider, service, region, environment, business_unit, instance_type,
@@ -209,7 +247,7 @@ def detect_spike(
     )
     if raw.empty:
         _log.info("detect_spike -> no cost data available for the given filters")
-        return {"spike_date": None, "message": "No cost data available for the given filters."}
+        return {"status": "no_data", "spike_date": None, "message": "No cost data available for the given filters."}
 
     full_dates = pd.date_range(query_start, max_date, freq="D").date
     report_dates = pd.date_range(window_start, max_date, freq="D").date
@@ -247,7 +285,7 @@ def detect_spike(
 
     if best is None:
         _log.info("detect_spike -> no anomalies detected in the given window")
-        return {"spike_date": None, "message": "No anomalies detected in the given window."}
+        return {"status": "no_anomaly", "spike_date": None, "message": "No anomalies detected in the given window."}
 
     spike_date = best["date"]
     driver_adapter = _adapter_for(best["provider"])
@@ -454,6 +492,9 @@ def list_resources(
     reports `status` ("running" or "stopped") as recorded. Omit `status` to
     return both.
     """
+    if status is not None and status not in ("running", "stopped"):
+        return _invalid_argument(f"status must be 'running' or 'stopped', got {status!r}.")
+
     _log.info(
         "list_resources(provider=%s, service=%s, resource_ids=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s, status=%s)",
         provider, service, f"{len(resource_ids)} given" if resource_ids else "none (sweeping all)",

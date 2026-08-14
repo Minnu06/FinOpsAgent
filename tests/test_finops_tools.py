@@ -96,3 +96,51 @@ def test_tool_results_stay_under_record_cap():
     assert len(detect_spike()["driver_resource_ids"]) <= 30
     assert len(find_idle_resources()["idle_resources"]) <= 30
     assert len(cost_trend("2026-04-02", "2026-06-30")["series"]) <= 30
+
+
+# --- Reliability hardening: bad-argument validation and no-data contract ---
+
+
+def test_cost_trend_rejects_unparseable_date():
+    result = cost_trend(start="not-a-date", end="2026-06-30")
+    assert result["status"] == "invalid_argument"
+    assert "message" in result
+
+
+def test_cost_trend_rejects_reversed_range():
+    result = cost_trend(start="2026-06-30", end="2026-06-01")
+    assert result["status"] == "invalid_argument"
+
+
+def test_cost_trend_rejects_bad_granularity():
+    # A value outside the day/week/month enum (e.g. from a local model that
+    # doesn't strictly honor schema enums) must not silently fall through the
+    # record-cap safeguard and return an unbounded series.
+    result = cost_trend("2026-06-01", "2026-06-30", granularity="fortnight")
+    assert result["status"] == "invalid_argument"
+
+
+def test_cost_trend_no_data_is_distinguishable_from_zero_cost():
+    result = cost_trend("2026-01-01", "2026-01-31", service="EC2", provider="AWS")
+    assert result["status"] == "no_data"
+    assert result["series"] == []
+
+
+def test_cost_trend_success_has_no_status_key():
+    # `"status" not in result` is the existing, tested signal (see
+    # test_regression_queries.py) that a result is real data, not a
+    # short-circuit — successful calls must not carry a status key.
+    result = cost_trend("2026-06-01", "2026-06-30", service="EC2", provider="AWS")
+    assert "status" not in result
+
+
+def test_detect_spike_rejects_non_positive_lookback_days():
+    result = detect_spike(lookback_days=0)
+    assert result["status"] == "invalid_argument"
+    result = detect_spike(lookback_days=-5)
+    assert result["status"] == "invalid_argument"
+
+
+def test_list_resources_rejects_bad_status():
+    result = list_resources(status="deleted")
+    assert result["status"] == "invalid_argument"

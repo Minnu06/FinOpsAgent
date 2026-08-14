@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from dotenv import load_dotenv
 
@@ -87,7 +87,7 @@ def _prepare_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, A
 
 class OpenAIClient:
     def __init__(self, model: str | None = None) -> None:
-        from openai import OpenAI
+        from openai import OpenAI, OpenAIError
 
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -97,6 +97,15 @@ class OpenAIClient:
             )
         self._model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self._client = OpenAI(api_key=api_key)
+        # Failure modes worth failing over to the local Ollama client for:
+        # OpenAIError covers timeouts, rate limits, connection drops, and
+        # 4xx/5xx API errors; the rest cover a response we can't parse (empty
+        # choices, malformed tool-call JSON). Read by _FallbackLLMClient.chat()
+        # below — a bug in our own code should still surface normally instead
+        # of being silently swallowed as a "provider failure".
+        self.transient_error_types: tuple[type[BaseException], ...] = (
+            OpenAIError, json.JSONDecodeError, IndexError, KeyError, AttributeError,
+        )
         _log.info("LLM backend: OpenAI, model=%s", self._model)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
@@ -144,10 +153,43 @@ class OllamaClient:
         return LLMResponse(content=message.get("content"), tool_calls=tool_calls)
 
 
+class _FallbackLLMClient:
+    """Wraps the primary OpenAI client with an automatic, transparent fallback
+    to the local Ollama client for a single failing call (timeout, rate limit,
+    connection error, 5xx, or a malformed/unparseable response).
+
+    This is how OpenAI stays the primary backend while a live session
+    survives an OpenAI outage without a manual LLM_PROVIDER flag change and
+    restart — the one architectural rule this hardens, not replaces. Once
+    triggered, this client stays on Ollama for the rest of its lifetime (one
+    run_agent() call) rather than flapping between providers mid-conversation.
+    """
+
+    def __init__(self, primary: OpenAIClient, fallback_factory: Callable[[], "OllamaClient"]) -> None:
+        self._primary = primary
+        self._fallback_factory = fallback_factory
+        self._fallback: OllamaClient | None = None
+        self.used_fallback = False
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
+        if self._fallback is not None:
+            return self._fallback.chat(messages, tools)
+        try:
+            return self._primary.chat(messages, tools)
+        except self._primary.transient_error_types as exc:
+            _log.warning(
+                "OpenAI call failed (%s: %s) -- falling back to local Ollama for the rest of this session",
+                type(exc).__name__, exc,
+            )
+            self._fallback = self._fallback_factory()
+            self.used_fallback = True
+            return self._fallback.chat(messages, tools)
+
+
 def get_llm_client() -> LLMClient:
     provider = os.environ.get("LLM_PROVIDER", "openai").lower()
     if provider == "ollama":
         return OllamaClient()
     if provider == "openai":
-        return OpenAIClient()
+        return _FallbackLLMClient(OpenAIClient(), OllamaClient)
     raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (expected 'openai' or 'ollama')")
