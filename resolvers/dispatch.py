@@ -23,7 +23,7 @@ from typing import Any
 
 from adapters import factory
 from agent.tool_schemas import REGISTRY
-from logging_setup import get_logger
+from logging_setup import get_logger, record_trace
 from resolvers.validation import validate
 
 _log = get_logger(__name__)
@@ -67,6 +67,7 @@ def resolve_and_execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
     if result.kind is not None:
         _log.info("resolve_and_execute(%s) short-circuited: %s — %s", name, result.kind, result.message)
+        record_trace("resolver", tool=name, raw_args=args, outcome=result.kind, message=result.message)
         payload: dict[str, Any] = {"status": result.kind, "message": result.message}
         if result.options:
             payload["options"] = list(result.options)
@@ -75,4 +76,5 @@ def resolve_and_execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
     assert result.request is not None  # kind is None => accepted => request is populated
     kwargs = result.request.to_kwargs(name)
     _log.debug("resolve_and_execute(%s) -> validated kwargs: %s", name, kwargs)
+    record_trace("resolver", tool=name, raw_args=args, outcome="resolved", resolved_args=kwargs)
     return func(**kwargs)

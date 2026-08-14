@@ -6,9 +6,13 @@ a sequence — this is the proof the system is agentic. A "Debug: show tool
 calls" toggle (gear icon / chat settings, on by default) lets the user turn
 that detail off for a plain chatbot view; tool calls still happen and are
 still fully logged either way, only the on-screen rendering is suppressed.
-The final answer streams in afterward. A "Scan for anomalies" starter injects
-the proactive investigation prompt; it is the same agent loop, only the first
-message differs.
+When the toggle is on, each tool step also gets a nested "pipeline trace"
+child step showing the resolver decision, adapter calls, and row counts
+behind that one call (agent.loop.run_agent(debug=True)) — when the toggle is
+off, run_agent isn't asked to collect any of that, so there's no extra work
+happening in the background either. The final answer streams in afterward. A
+"Scan for anomalies" starter injects the proactive investigation prompt; it
+is the same agent loop, only the first message differs.
 
 A provider dropdown (gear icon / chat settings) lets the user hard-scope a
 session to AWS, Azure, or both — enforced deterministically in agent/loop.py,
@@ -132,7 +136,12 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
 
 
 async def _invoke_agent(
-    message: cl.Message, provider: str | None, history: list[dict[str, Any]], on_tool_call: Any
+    message: cl.Message,
+    provider: str | None,
+    history: list[dict[str, Any]],
+    on_tool_call: Any,
+    debug: bool = False,
+    on_debug_trace: Any = None,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     """Runs the agent loop and reports an error to the user on failure.
 
@@ -142,7 +151,13 @@ async def _invoke_agent(
     """
     try:
         return await asyncio.to_thread(
-            run_agent, message.content, on_tool_call=on_tool_call, provider=provider, history=history
+            run_agent,
+            message.content,
+            on_tool_call=on_tool_call,
+            provider=provider,
+            history=history,
+            debug=debug,
+            on_debug_trace=on_debug_trace,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
         _log.exception("Agent error")
@@ -197,6 +212,7 @@ async def main(message: cl.Message) -> None:
         return
 
     tool_calls_made: list[str] = []
+    last_step: dict[str, cl.Step] = {}
 
     async with cl.Step(name="🔎 Investigating", type="run", default_open=True) as investigation:
         investigation.input = message.content
@@ -209,10 +225,40 @@ async def main(message: cl.Message) -> None:
                 step.input = json.dumps(args, default=str, indent=2)
                 step.output = json.dumps(result, default=str, indent=2)
                 await step.send()
+                last_step["step"] = step
 
             asyncio.run_coroutine_threadsafe(render_step(), loop).result()
 
-        result = await _invoke_agent(message, provider, history, on_tool_call)
+        def on_debug_trace(name: str, trace: list[dict[str, Any]]) -> None:
+            # Fires right after on_tool_call for the same call, so last_step
+            # already holds that call's step. Attach the trace as a "side"
+            # display element — Chainlit's built-in split view, opened by
+            # clicking the element chip on the step — instead of nesting it
+            # as a further-collapsed child step, which turned out to be too
+            # buried to notice (it's one more expand-click below "Used
+            # cost_trend", already itself collapsed by default).
+            if not trace:
+                return
+            step = last_step.get("step")
+            if step is None:
+                return
+
+            async def render_trace() -> None:
+                step.elements = [
+                    cl.Text(
+                        name="🔬 pipeline trace",
+                        content=json.dumps(trace, default=str, indent=2),
+                        display="side",
+                        language="json",
+                    )
+                ]
+                await step.update()
+
+            asyncio.run_coroutine_threadsafe(render_trace(), loop).result()
+
+        result = await _invoke_agent(
+            message, provider, history, on_tool_call, debug=True, on_debug_trace=on_debug_trace
+        )
         if result is None:
             investigation.output = "Failed — see error message above."
             return

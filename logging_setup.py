@@ -15,6 +15,14 @@ signatures — they just log normally and the active session's file handler
 (filtered by session id) picks it up. `asyncio.to_thread` and
 `run_coroutine_threadsafe` both propagate contextvars, so this works
 transparently across the Chainlit UI's background-thread tool execution.
+
+A second, unrelated contextvar (`trace_capture` / `record_trace` below) uses
+the same pattern to collect a structured pipeline trace (resolver decision,
+adapter row counts, tool-level checkpoints) for a single tool call, for the
+Chainlit UI's debug mode. It's opt-in per call: `record_trace` is a no-op
+unless something upstream has opened a `trace_capture()` block, so callers in
+the resolver/tool/adapter layers can call it unconditionally with zero cost
+when no one is collecting.
 """
 
 from __future__ import annotations
@@ -26,11 +34,12 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 LOGS_DIR = Path(__file__).resolve().parent / "logs"
 
 _session_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("session_id", default="-")
+_trace_var: contextvars.ContextVar["list[dict[str, Any]] | None"] = contextvars.ContextVar("debug_trace", default=None)
 
 _CONSOLE_FORMAT = "%(asctime)s [%(session_id)s] %(name)s: %(message)s"
 _FILE_FORMAT = "%(asctime)s %(levelname)-7s [%(session_id)s] %(name)s: %(message)s"
@@ -138,3 +147,34 @@ def session_scope(label: str = "session") -> Iterator[str]:
         yield session_id
     finally:
         end_session(session_id, handler)
+
+
+@contextmanager
+def trace_capture() -> Iterator[list[dict[str, Any]]]:
+    """Open a window for collecting a structured pipeline trace.
+
+    Yields the (initially empty) list that `record_trace()` calls made
+    anywhere during this block — directly or from a background thread /
+    another task, since contextvars propagate the same way session id does —
+    will append to. Meant to wrap a single tool-call dispatch so the caller
+    gets back exactly the resolver/tool/adapter records produced by that one
+    call, not the whole conversation.
+    """
+    trace: list[dict[str, Any]] = []
+    token = _trace_var.set(trace)
+    try:
+        yield trace
+    finally:
+        _trace_var.reset(token)
+
+
+def record_trace(layer: str, **fields: Any) -> None:
+    """Append one record to the currently open `trace_capture()` window, if
+    any. A no-op (single contextvar read, no allocation) when no window is
+    open, so call sites in the resolver/tool/adapter layers can call this
+    unconditionally without adding cost when nothing is collecting.
+    """
+    trace = _trace_var.get()
+    if trace is None:
+        return
+    trace.append({"layer": layer, **fields})
