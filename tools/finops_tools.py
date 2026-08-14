@@ -642,10 +642,16 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
         if rec is not None:
             rec = {"resource_id": rid, "service": svc, "monthly_saving_usd": saving, **rec}
             recommendations.append(rec)
-            total_saving += saving
 
-    _log.info("recommend -> %d recommendation(s), total_monthly_saving_usd=$%.2f", len(recommendations), total_saving)
+    # total_monthly_saving_usd must sum exactly the line items being returned
+    # below, not every resource evaluated — capping recommendations to
+    # _MAX_RECORDS while summing over the uncapped list would report a total
+    # that doesn't match what the caller can actually see and add up itself.
+    capped_recommendations = _cap_round_robin(recommendations, "action", _MAX_RECORDS)
+    total_saving = round(sum(r["monthly_saving_usd"] for r in capped_recommendations), 2)
+
+    _log.info("recommend -> %d recommendation(s), total_monthly_saving_usd=$%.2f", len(capped_recommendations), total_saving)
     return {
-        "recommendations": _cap_round_robin(recommendations, "action", _MAX_RECORDS),
-        "total_monthly_saving_usd": round(total_saving, 2),
+        "recommendations": capped_recommendations,
+        "total_monthly_saving_usd": total_saving,
     }
