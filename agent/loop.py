@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from agent.llm import get_llm_client
 from agent.tool_schemas import REGISTRY, SCHEMAS
-from logging_setup import get_logger
+from logging_setup import get_logger, trace_capture
 from resolvers.dispatch import resolve_and_execute
 from tools.finops_tools import data_date_range
 
@@ -164,6 +164,7 @@ ANSWER FORMAT:
 """
 
 ToolCallHook = Callable[[str, dict[str, Any], dict[str, Any]], None]
+DebugTraceHook = Callable[[str, "list[dict[str, Any]]"], None]
 
 _PARAM_TYPES: dict[str, dict[str, str]] = {
     schema["function"]["name"]: {
@@ -278,6 +279,8 @@ def run_agent(
     max_turns: int = 8,
     provider: str | None = None,
     history: list[dict[str, Any]] | None = None,
+    debug: bool = False,
+    on_debug_trace: DebugTraceHook | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run the tool-calling loop for a single user message.
 
@@ -293,6 +296,15 @@ def run_agent(
     `history`, if given, is the list of prior turns (user/assistant/tool messages,
     excluding the system prompt) returned by an earlier call — pass it back in so
     follow-up questions have context. Omit for a fresh conversation.
+
+    `debug`, if True, opens a `trace_capture()` window around each tool call so the
+    resolver/tool/adapter layers' `record_trace(...)` calls actually collect
+    something, then fires `on_debug_trace(name, trace)` with exactly the records
+    produced by that one call — this is a separate hook from `on_tool_call` (not a
+    4th argument to it) so existing callers that only handle (name, args, result)
+    are unaffected. Leave both False/None (the default) for zero added cost: no
+    trace window is opened, so every `record_trace` call in the pipeline is a single
+    cheap no-op, identical to today's behavior.
     """
     _log.info('User query: "%s" (provider=%s, history_turns=%d)', user_message, provider or "both/inferred", len(history or []))
     client = get_llm_client()
@@ -321,6 +333,7 @@ def run_agent(
 
         for tc in response.tool_calls:
             func = REGISTRY.get(tc.name)
+            trace: list[dict[str, Any]] = []
             if func is None:
                 _log.warning("Model requested unknown tool: %s", tc.name)
                 result = {"error": f"Unknown tool: {tc.name}"}
@@ -333,7 +346,11 @@ def run_agent(
                     args["provider"] = provider
                 _log.debug("Calling %s(%s)", tc.name, args)
                 try:
-                    result = resolve_and_execute(tc.name, args)
+                    if debug:
+                        with trace_capture() as trace:
+                            result = resolve_and_execute(tc.name, args)
+                    else:
+                        result = resolve_and_execute(tc.name, args)
                 except Exception as exc:  # noqa: BLE001 - fed back to the model, not swallowed
                     _log.warning("Tool %s raised %s: %s", tc.name, type(exc).__name__, exc)
                     result = {"error": f"{type(exc).__name__}: {exc}"}
@@ -341,6 +358,8 @@ def run_agent(
                     _log.debug("%s returned: %s", tc.name, json.dumps(result, default=str))
             if on_tool_call:
                 on_tool_call(tc.name, args, result)
+            if debug and on_debug_trace:
+                on_debug_trace(tc.name, trace)
             messages.append(_tool_message(tc.id, tc.name, result))
 
     _log.warning("Max turns (%d) reached without a final answer", max_turns)

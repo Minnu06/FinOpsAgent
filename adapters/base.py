@@ -12,6 +12,17 @@ class CloudAdapter(Protocol):
     Only this layer may know how the underlying data is fetched (CSV today,
     boto3/Azure SDK calls in v2). Everything above it works with plain
     pandas.DataFrame results and provider-agnostic filters.
+
+    Every concrete implementation of get_cost/get_utilization/get_metadata
+    should call `logging_setup.record_trace("adapter", provider=..., source=...,
+    method=..., rows_read=...)` right after fetching, before returning — this
+    is what powers the Chainlit UI's debug-mode pipeline trace (which
+    provider/source was actually hit, how many rows came back). It's a no-op
+    unless something upstream is collecting, so it's safe to call
+    unconditionally; a future boto3/Azure SDK-backed adapter should keep
+    calling it the same way SyntheticAdapter does, with `source` naming
+    whatever the real data source is (an API endpoint, a table) instead of a
+    file name.
     """
 
     provider: str

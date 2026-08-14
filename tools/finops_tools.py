@@ -17,7 +17,7 @@ import pandas as pd
 from adapters import factory
 from adapters.base import CloudAdapter
 from adapters.multi import MultiCloudAdapter
-from logging_setup import get_logger
+from logging_setup import get_logger, record_trace
 
 _log = get_logger(__name__)
 
@@ -169,12 +169,18 @@ def cost_trend(
     # ones asked for.
     date_group_by = ["date", "resource_id"] if resource_ids else ["date"]
     df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=date_group_by, extra_filters=filters)
+    raw_rows = len(df)
     if resource_ids:
         df = df[df["resource_id"].isin(resource_ids)]
+    resource_filtered_rows = len(df) if resource_ids else None
     df = df.groupby("date", as_index=False)["cost_usd"].sum().sort_values("date")
 
     if df.empty:
         _log.info("cost_trend -> no cost data available for the given filters")
+        record_trace(
+            "tool", tool="cost_trend", raw_rows=raw_rows, resource_filtered_rows=resource_filtered_rows,
+            daily_points=0, final_series_points=0, total=0.0,
+        )
         return {
             "status": "no_data",
             "message": "No cost data found for the given filters and date range.",
@@ -195,6 +201,8 @@ def cost_trend(
             provider_totals = provider_totals[provider_totals["resource_id"].isin(resource_ids)]
             provider_totals = provider_totals.groupby("provider", as_index=False)["cost_usd"].sum()
         by_provider = {row["provider"]: round(float(row["cost_usd"]), 2) for _, row in provider_totals.iterrows()}
+
+    daily_points = len(df)
 
     # Guarantee the ~30 record cap regardless of requested granularity/range.
     if granularity == "day" and len(df) > _MAX_RECORDS:
@@ -224,6 +232,10 @@ def cost_trend(
     _log.info(
         "cost_trend -> total=$%.2f avg_daily=$%.2f pct_change=%.1f%% (%d points) by_provider=%s",
         total, avg_daily, pct_change_first_last, len(series), by_provider,
+    )
+    record_trace(
+        "tool", tool="cost_trend", raw_rows=raw_rows, resource_filtered_rows=resource_filtered_rows,
+        daily_points=daily_points, final_series_points=len(series[:_MAX_RECORDS]), total=total,
     )
     return {
         "series": series[:_MAX_RECORDS],
@@ -271,14 +283,17 @@ def detect_spike(
     )
     if raw.empty:
         _log.info("detect_spike -> no cost data available for the given filters")
+        record_trace("tool", tool="detect_spike", raw_rows=0, groups_scanned=0, driver_lookup_rows=None, driver_count=0)
         return {"status": "no_data", "spike_date": None, "message": "No cost data available for the given filters."}
 
     full_dates = pd.date_range(query_start, max_date, freq="D").date
     report_dates = pd.date_range(window_start, max_date, freq="D").date
 
     best: dict[str, Any] | None = None
+    groups_scanned = 0
 
     for (prov, svc, reg), group in raw.groupby(["provider", "service", "region"]):
+        groups_scanned += 1
         series = group.set_index("date")["cost_usd"].reindex(full_dates, fill_value=0.0)
         trailing_mean = series.rolling(window=_SPIKE_TRAILING_WINDOW_DAYS, min_periods=7).mean().shift(1)
         trailing_std = series.rolling(window=_SPIKE_TRAILING_WINDOW_DAYS, min_periods=7).std(ddof=0).shift(1)
@@ -309,6 +324,10 @@ def detect_spike(
 
     if best is None:
         _log.info("detect_spike -> no anomalies detected in the given window")
+        record_trace(
+            "tool", tool="detect_spike", raw_rows=len(raw), groups_scanned=groups_scanned,
+            driver_lookup_rows=None, driver_count=0,
+        )
         return {"status": "no_anomaly", "spike_date": None, "message": "No anomalies detected in the given window."}
 
     spike_date = best["date"]
@@ -334,6 +353,10 @@ def detect_spike(
     _log.info(
         "detect_spike -> spike_date=%s service=%s provider=%s region=%s baseline=$%.2f spiked=$%.2f (+%.1f%%) drivers=%d",
         spike_date, best["service"], best["provider"], best["region"], best["baseline"], best["spiked"], best["pct_increase"], len(driver_ids),
+    )
+    record_trace(
+        "tool", tool="detect_spike", raw_rows=len(raw), groups_scanned=groups_scanned,
+        driver_lookup_rows=len(resource_costs), driver_count=len(driver_ids),
     )
     return {
         "spike_date": spike_date.isoformat(),
@@ -423,9 +446,11 @@ def find_idle_resources(
     )
     if not candidate_ids:
         _log.info("find_idle_resources -> no candidate resources in scope")
+        record_trace("tool", tool="find_idle_resources", candidate_count=0, metadata_rows=0, utilization_rows=0, idle_found=0)
         return {"idle_resources": [], "count": 0}
 
-    meta = adapter.get_metadata(candidate_ids).set_index("resource_id")
+    meta_df = adapter.get_metadata(candidate_ids)
+    meta = meta_df.set_index("resource_id")
     util = adapter.get_utilization(candidate_ids)
 
     idle: list[dict[str, Any]] = []
@@ -492,6 +517,10 @@ def find_idle_resources(
 
     reason_counts = {r: sum(1 for i in idle if i["reason"] == r) for r in dict.fromkeys(i["reason"] for i in idle)}
     _log.info("find_idle_resources -> %d idle of %d candidates checked, by reason: %s", len(idle), len(candidate_ids), reason_counts)
+    record_trace(
+        "tool", tool="find_idle_resources", candidate_count=len(candidate_ids),
+        metadata_rows=len(meta_df), utilization_rows=len(util), idle_found=len(idle),
+    )
     return {"idle_resources": _cap_round_robin(idle, "reason", _MAX_RECORDS), "count": len(idle)}
 
 
@@ -534,9 +563,11 @@ def list_resources(
     )
     if not candidate_ids:
         _log.info("list_resources -> no candidate resources in scope")
+        record_trace("tool", tool="list_resources", candidate_count=0, metadata_rows=0, matched=0)
         return {"resources": [], "count": 0}
 
-    meta = adapter.get_metadata(candidate_ids).set_index("resource_id")
+    meta_df = adapter.get_metadata(candidate_ids)
+    meta = meta_df.set_index("resource_id")
 
     resources: list[dict[str, Any]] = []
     for rid in candidate_ids:
@@ -562,6 +593,10 @@ def list_resources(
 
     resources.sort(key=lambda r: r["monthly_cost_usd"], reverse=True)
     _log.info("list_resources -> %d of %d candidates matched (status=%s)", len(resources), len(candidate_ids), status)
+    record_trace(
+        "tool", tool="list_resources", candidate_count=len(candidate_ids),
+        metadata_rows=len(meta_df), matched=len(resources),
+    )
     return {"resources": resources[:_MAX_RECORDS], "count": len(resources)}
 
 
@@ -577,6 +612,7 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
     _log.info("recommend(%d resource_ids)", len(resource_ids) if resource_ids else 0)
     if not resource_ids:
         _log.info("recommend -> no resource_ids given")
+        record_trace("tool", tool="recommend", requested_ids=0, metadata_rows=0, utilization_rows=0, recommendations=0)
         return {"recommendations": [], "total_monthly_saving_usd": 0.0}
 
     adapter = _ALL
@@ -585,7 +621,8 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
     window_days = _UTILIZATION_WINDOW_DAYS
 
     unique_ids = list(dict.fromkeys(resource_ids))
-    meta = adapter.get_metadata(unique_ids).set_index("resource_id")
+    meta_df = adapter.get_metadata(unique_ids)
+    meta = meta_df.set_index("resource_id")
     util = adapter.get_utilization(unique_ids)
 
     recommendations: list[dict[str, Any]] = []
@@ -657,6 +694,10 @@ def recommend(resource_ids: list[str]) -> dict[str, Any]:
     total_saving = round(sum(r["monthly_saving_usd"] for r in capped_recommendations), 2)
 
     _log.info("recommend -> %d recommendation(s), total_monthly_saving_usd=$%.2f", len(capped_recommendations), total_saving)
+    record_trace(
+        "tool", tool="recommend", requested_ids=len(unique_ids), metadata_rows=len(meta_df),
+        utilization_rows=len(util), recommendations=len(capped_recommendations),
+    )
     return {
         "recommendations": capped_recommendations,
         "total_monthly_saving_usd": total_saving,

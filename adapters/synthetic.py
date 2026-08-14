@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from logging_setup import get_logger
+from logging_setup import get_logger, record_trace
 
 _log = get_logger(__name__)
 
@@ -114,22 +114,38 @@ class SyntheticAdapter:
             "%s.get_cost(start=%s, end=%s, service=%s, region=%s, group_by=%s, extra_filters=%s) -> %d rows",
             self.provider, start, end, service, region, group_by, extra_filters, len(result),
         )
+        record_trace(
+            "adapter", provider=self.provider, source=self._path.name, method="get_cost",
+            rows_read=len(result), source_total_rows=len(self.df),
+        )
         return result
 
     def get_utilization(self, resource_ids: list[str]) -> pd.DataFrame:
         df = self.df[self.df["resource_id"].isin(resource_ids)]
         result = df[_UTILIZATION_COLUMNS].copy()
         _log.debug("%s.get_utilization(%d resource_ids) -> %d rows", self.provider, len(resource_ids), len(result))
+        record_trace(
+            "adapter", provider=self.provider, source=self._path.name, method="get_utilization",
+            rows_read=len(result), source_total_rows=len(self.df),
+        )
         return result
 
     def get_metadata(self, resource_ids: list[str]) -> pd.DataFrame:
         df = self.df[self.df["resource_id"].isin(resource_ids)]
         if df.empty:
             _log.debug("%s.get_metadata(%d resource_ids) -> 0 rows", self.provider, len(resource_ids))
+            record_trace(
+                "adapter", provider=self.provider, source=self._path.name, method="get_metadata",
+                rows_read=0, source_total_rows=len(self.df),
+            )
             return df[_METADATA_COLUMNS].copy()
         latest = df.sort_values("date").groupby("resource_id", as_index=False).last()
         result = latest[_METADATA_COLUMNS].copy()
         _log.debug("%s.get_metadata(%d resource_ids) -> %d rows", self.provider, len(resource_ids), len(result))
+        record_trace(
+            "adapter", provider=self.provider, source=self._path.name, method="get_metadata",
+            rows_read=len(result), source_total_rows=len(self.df),
+        )
         return result
 
     def list_services(self) -> list[str]:
