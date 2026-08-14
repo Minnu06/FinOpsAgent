@@ -47,6 +47,13 @@ or recommendations and no resource IDs are yet in context, call detect_spike and
 find_idle_resources first to discover real ones — do not skip straight to recommend on a
 guess.
 
+SPIKE SCOPE: detect_spike's baseline_daily and spiked_daily are the cost of the specific
+service+region combination that is actually spiking (also returned as the service/region
+fields alongside them) — not the provider's total spend across every service and region.
+When you cite these figures, always name that scope (e.g. "AWS EC2 in us-east-1 rose from
+$318.61/day to $534.63/day"), never describe them as "AWS's total cost" or "the account's
+daily spend."
+
 TOOL SELECTION — INVENTORY VS WASTE (do not conflate these):
 - "what's running", "show our EC2 instances", "what's stopped in Azure", "list resources
   tagged prod", "what do we have in us-east-1" — these are plain inventory questions with
