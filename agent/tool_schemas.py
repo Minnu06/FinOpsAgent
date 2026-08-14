@@ -103,11 +103,13 @@ SCHEMAS: list[dict[str, Any]] = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Optional specific resource ID(s) to scope the trend to, e.g. "
-                            "'cost history for i-01340d8aaf25488c8'. Without this, filters like "
-                            "instance_type still aggregate across every resource matching that "
-                            "filter, not just the one resource the user asked about — always set "
-                            "this when the user names a specific resource ID."
+                            "REQUIRED whenever the user names a specific resource ID or ARN, e.g. "
+                            "'cost history for i-01340d8aaf25488c8' or 'what did this instance cost' "
+                            "-> resource_ids=['i-01340d8aaf25488c8']. Do not substitute service, "
+                            "provider, or instance_type instead, even though they're easy to infer "
+                            "from the ID — those filters silently aggregate across every OTHER "
+                            "resource that shares them too, producing a wrong, inflated total for "
+                            "what should be a single resource's cost."
                         ),
                     },
                 },

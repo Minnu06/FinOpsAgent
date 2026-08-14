@@ -57,6 +57,14 @@ or recommendations and no resource IDs are yet in context, call detect_spike and
 find_idle_resources first to discover real ones — do not skip straight to recommend on a
 guess.
 
+If the user names one or more specific resource IDs (an EC2 instance ID like "i-...", an
+EBS volume ID, a Lambda ARN, an Azure resource name) in a cost_trend question — "cost
+history for i-01340d8aaf25488c8", "what did this instance cost" — you MUST pass those
+exact IDs as cost_trend's resource_ids argument. Do not substitute service, provider, or
+instance_type filters instead, even though the resource's service/type is easy to infer —
+those filters aggregate across every other resource that shares them, not just the one
+resource named, and will produce a wrong, inflated total.
+
 SPIKE SCOPE: detect_spike's baseline_daily and spiked_daily are the cost of the specific
 service+region combination that is actually spiking (also returned as the service/region
 fields alongside them) — not the provider's total spend across every service and region.

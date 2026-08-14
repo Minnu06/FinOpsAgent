@@ -204,7 +204,13 @@ def cost_trend(
         freq = "W" if granularity == "week" else "MS"
         indexed = df.set_index(pd.to_datetime(df["date"]))["cost_usd"]
         resampled = indexed.resample(freq).sum()
-        df = pd.DataFrame({"date": resampled.index.date, "cost_usd": resampled.values})
+        # "W" labels each bucket with its calendar-closing Sunday, which can
+        # fall after end_d for the final, partial week (e.g. only 2 real days
+        # of data land in a bucket labeled a week later) — the sum is still
+        # exactly the real data in range, but the label must never claim a
+        # date beyond what was actually requested.
+        dates = [min(d, end_d) for d in resampled.index.date]
+        df = pd.DataFrame({"date": dates, "cost_usd": resampled.values})
 
     series = [{"date": d.isoformat(), "cost": round(float(c), 2)} for d, c in zip(df["date"], df["cost_usd"])]
     total = round(float(df["cost_usd"].sum()), 2)
