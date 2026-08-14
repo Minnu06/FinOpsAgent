@@ -14,7 +14,9 @@ def test_to_kwargs_per_tool_field_projection():
     request = CanonicalRequest(
         provider="AWS", service="EC2", region="us-east-1", resource_ids=["i-1"], lookback_days=14
     )
-    assert request.to_kwargs("cost_trend") == {"service": "EC2", "provider": "AWS", "region": "us-east-1"}
+    assert request.to_kwargs("cost_trend") == {
+        "service": "EC2", "provider": "AWS", "region": "us-east-1", "resource_ids": ["i-1"]
+    }
     assert request.to_kwargs("detect_spike") == {
         "lookback_days": 14, "provider": "AWS", "service": "EC2", "region": "us-east-1"
     }

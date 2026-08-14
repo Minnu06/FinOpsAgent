@@ -24,7 +24,7 @@ from typing import Any
 # only includes fields whose value is not None).
 _TOOL_FIELDS: dict[str, tuple[str, ...]] = {
     "cost_trend": (
-        "start", "end", "service", "provider", "granularity", "region", "environment", "business_unit", "instance_type"
+        "start", "end", "service", "provider", "granularity", "region", "resource_ids", "environment", "business_unit", "instance_type"
     ),
     "detect_spike": (
         "lookback_days", "provider", "service", "region", "environment", "business_unit", "instance_type"

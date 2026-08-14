@@ -99,6 +99,17 @@ SCHEMAS: list[dict[str, Any]] = [
                     "environment": _ENVIRONMENT_PROPERTY,
                     "business_unit": _BUSINESS_UNIT_PROPERTY,
                     "instance_type": _INSTANCE_TYPE_PROPERTY,
+                    "resource_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional specific resource ID(s) to scope the trend to, e.g. "
+                            "'cost history for i-01340d8aaf25488c8'. Without this, filters like "
+                            "instance_type still aggregate across every resource matching that "
+                            "filter, not just the one resource the user asked about — always set "
+                            "this when the user names a specific resource ID."
+                        ),
+                    },
                 },
                 "required": [],
             },

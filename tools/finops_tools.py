@@ -121,6 +121,7 @@ def cost_trend(
     environment: str | None = None,
     business_unit: str | None = None,
     instance_type: str | None = None,
+    resource_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Daily (or auto-aggregated) cost totals with summary stats.
 
@@ -130,6 +131,10 @@ def cost_trend(
     recent 30 days of available data — do not guess dates yourself. When
     `provider` is omitted (scanning both clouds), the result includes a
     `by_provider` breakdown so a per-cloud split doesn't require a second call.
+    Pass `resource_ids` to scope the trend to one or a few specific resources
+    (e.g. "cost history for i-01340d8aaf25488c8") — without it, `instance_type`/
+    `environment`/`business_unit` filters still aggregate across every
+    resource matching that filter, not just the one the user asked about.
     """
     try:
         end_d = _to_date(end) if end is not None else _max_available_date()
@@ -150,13 +155,22 @@ def cost_trend(
         return _invalid_argument(f"granularity {granularity!r} must be one of 'day', 'week', 'month'.")
 
     _log.info(
-        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s)",
+        "cost_trend(start=%s, end=%s, service=%s, provider=%s, granularity=%s, region=%s, environment=%s, business_unit=%s, instance_type=%s, resource_ids=%s)",
         start_d, end_d, service, provider, granularity, region, environment, business_unit, instance_type,
+        f"{len(resource_ids)} given" if resource_ids else "none",
     )
     adapter = _adapter_for(provider)
     filters = _extra_filters(environment, business_unit, instance_type)
 
-    df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=["date"], extra_filters=filters)
+    # When scoping to specific resources, fetch at resource_id granularity so
+    # we can filter to exactly those resources before collapsing to a daily
+    # total — group_by=["date"] alone would sum every resource matching the
+    # broader filters (e.g. every same-instance_type resource), not just the
+    # ones asked for.
+    date_group_by = ["date", "resource_id"] if resource_ids else ["date"]
+    df = adapter.get_cost(start_d, end_d, service=service, region=region, group_by=date_group_by, extra_filters=filters)
+    if resource_ids:
+        df = df[df["resource_id"].isin(resource_ids)]
     df = df.groupby("date", as_index=False)["cost_usd"].sum().sort_values("date")
 
     if df.empty:
@@ -173,9 +187,13 @@ def cost_trend(
 
     by_provider: dict[str, float] | None = None
     if provider is None:
+        provider_group_by = ["provider", "resource_id"] if resource_ids else ["provider"]
         provider_totals = adapter.get_cost(
-            start_d, end_d, service=service, region=region, group_by=["provider"], extra_filters=filters
+            start_d, end_d, service=service, region=region, group_by=provider_group_by, extra_filters=filters
         )
+        if resource_ids:
+            provider_totals = provider_totals[provider_totals["resource_id"].isin(resource_ids)]
+            provider_totals = provider_totals.groupby("provider", as_index=False)["cost_usd"].sum()
         by_provider = {row["provider"]: round(float(row["cost_usd"]), 2) for _, row in provider_totals.iterrows()}
 
     # Guarantee the ~30 record cap regardless of requested granularity/range.
