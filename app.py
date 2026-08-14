@@ -212,7 +212,7 @@ async def main(message: cl.Message) -> None:
         return
 
     tool_calls_made: list[str] = []
-    last_step_id: dict[str, str] = {}
+    last_step: dict[str, cl.Step] = {}
 
     async with cl.Step(name="🔎 Investigating", type="run", default_open=True) as investigation:
         investigation.input = message.content
@@ -225,23 +225,34 @@ async def main(message: cl.Message) -> None:
                 step.input = json.dumps(args, default=str, indent=2)
                 step.output = json.dumps(result, default=str, indent=2)
                 await step.send()
-                last_step_id["id"] = step.id
+                last_step["step"] = step
 
             asyncio.run_coroutine_threadsafe(render_step(), loop).result()
 
         def on_debug_trace(name: str, trace: list[dict[str, Any]]) -> None:
-            # Fires right after on_tool_call for the same call, so last_step_id
-            # already holds that call's step — nest the trace as its child,
-            # the same parent/child pattern "Investigating" already uses for
-            # each tool step.
+            # Fires right after on_tool_call for the same call, so last_step
+            # already holds that call's step. Attach the trace as a "side"
+            # display element — Chainlit's built-in split view, opened by
+            # clicking the element chip on the step — instead of nesting it
+            # as a further-collapsed child step, which turned out to be too
+            # buried to notice (it's one more expand-click below "Used
+            # cost_trend", already itself collapsed by default).
             if not trace:
                 return
-            parent_id = last_step_id.get("id", investigation.id)
+            step = last_step.get("step")
+            if step is None:
+                return
 
             async def render_trace() -> None:
-                step = cl.Step(name="🔬 pipeline trace", type="tool", parent_id=parent_id)
-                step.output = json.dumps(trace, default=str, indent=2)
-                await step.send()
+                step.elements = [
+                    cl.Text(
+                        name="🔬 pipeline trace",
+                        content=json.dumps(trace, default=str, indent=2),
+                        display="side",
+                        language="json",
+                    )
+                ]
+                await step.update()
 
             asyncio.run_coroutine_threadsafe(render_trace(), loop).result()
 
